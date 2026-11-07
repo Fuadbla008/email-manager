@@ -34,6 +34,8 @@ export default function SupervisorAssignView({
   const [assignDate, setAssignDate] = useState(initialAssignDate)
   const [selectedIds, setSelectedIds] = useState([])
   const [selectedPendingIds, setSelectedPendingIds] = useState([])
+  const [pendingUserFilter, setPendingUserFilter] = useState('all')
+  const [pendingCount, setPendingCount] = useState('50')
   const [search, setSearch] = useState('')
   const [quickCount, setQuickCount] = useState('30')
   const [busy, setBusy] = useState(false)
@@ -51,6 +53,32 @@ export default function SupervisorAssignView({
   function userLabel(userId) {
     const user = users.find(u => u.id === userId)
     return user?.full_name || user?.email || 'Unknown user'
+  }
+
+  // Users that currently have pending rows assigned by this supervisor.
+  const pendingUsers = (() => {
+    const map = new Map()
+    pendingRows.forEach(row => {
+      if (!row.assigned_to || map.has(row.assigned_to)) return
+      map.set(
+        row.assigned_to,
+        row.assigned_profile?.full_name ||
+          row.assigned_profile?.email ||
+          userLabel(row.assigned_to)
+      )
+    })
+    return Array.from(map, ([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label))
+  })()
+
+  const filteredPendingRows =
+    pendingUserFilter === 'all'
+      ? pendingRows
+      : pendingRows.filter(row => row.assigned_to === pendingUserFilter)
+
+  function changePendingUser(value) {
+    setPendingUserFilter(value)
+    setSelectedPendingIds([])
   }
 
   function toggle(id) {
@@ -71,9 +99,12 @@ export default function SupervisorAssignView({
   }
 
   function toggleAllPending() {
-    const ids = pendingRows.map(p => p.id)
+    const ids = filteredPendingRows.slice(0, MAX_UNASSIGN).map(p => p.id)
     const all = ids.length > 0 && ids.every(id => selectedPendingIds.includes(id))
     setSelectedPendingIds(all ? [] : ids)
+    if (!all && filteredPendingRows.length > MAX_UNASSIGN) {
+      toast.message(`Selected the first ${MAX_UNASSIGN} rows (max per action).`)
+    }
   }
 
   function addAssignedToPending(assignedRows) {
@@ -145,15 +176,14 @@ export default function SupervisorAssignView({
     }
   }
 
-  async function handleUnassign() {
-    if (selectedPendingIds.length === 0) return
-    if (selectedPendingIds.length > MAX_UNASSIGN) {
-      toast.error(`Max ${MAX_UNASSIGN} per action. Selected: ${selectedPendingIds.length}`)
+  async function unassignIds(ids) {
+    if (ids.length === 0) return
+    if (ids.length > MAX_UNASSIGN) {
+      toast.error(`Max ${MAX_UNASSIGN} per action. Selected: ${ids.length}`)
       return
     }
-    if (!confirm(`Unassign ${selectedPendingIds.length} pending credential(s)?`)) return
+    if (!confirm(`Unassign ${ids.length} pending credential(s)?`)) return
 
-    const ids = selectedPendingIds
     const snapshot = pendingRows
     const taken = snapshot.filter(row => ids.includes(row.id))
     setPendingBusy(true)
@@ -183,6 +213,28 @@ export default function SupervisorAssignView({
     toast.success(`Unassigned ${res.updated} pending credential(s).`)
     if (res.skipped) toast.message(`${res.skipped} row(s) were skipped (not pending or not yours).`)
     router.refresh()
+  }
+
+  function handleUnassign() {
+    unassignIds(selectedPendingIds)
+  }
+
+  function handleUnassignCount() {
+    const count = Number(pendingCount)
+    if (!Number.isInteger(count) || count < 1) {
+      toast.error('Enter a valid number greater than 0.')
+      return
+    }
+    if (count > MAX_UNASSIGN) {
+      toast.error(`Max ${MAX_UNASSIGN} per action.`)
+      return
+    }
+    const ids = filteredPendingRows.slice(0, count).map(row => row.id)
+    if (ids.length === 0) {
+      toast.error('No pending rows match this filter.')
+      return
+    }
+    unassignIds(ids)
   }
 
   return (
@@ -321,7 +373,68 @@ export default function SupervisorAssignView({
             </p>
           ) : (
             <>
+              <div className="grid gap-3 md:grid-cols-3 mb-3">
+                <div className="space-y-1">
+                  <Label htmlFor="pending-user">Which user&apos;s data?</Label>
+                  <Select value={pendingUserFilter} onValueChange={changePendingUser}>
+                    <SelectTrigger id="pending-user" className="w-full">
+                      <SelectValue placeholder="All users" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All users ({pendingRows.length})</SelectItem>
+                      {pendingUsers.map(u => (
+                        <SelectItem key={u.id} value={u.id}>
+                          {u.label} ({pendingRows.filter(r => r.assigned_to === u.id).length})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <Label htmlFor="pending-count">How many to unassign?</Label>
+                  <Input
+                    id="pending-count"
+                    type="number"
+                    min="1"
+                    max={MAX_UNASSIGN}
+                    value={pendingCount}
+                    onChange={e => setPendingCount(e.target.value)}
+                    className="w-full"
+                  />
+                </div>
+
+                <div className="flex items-end">
+                  <Button
+                    variant="destructive"
+                    className="w-full"
+                    onClick={handleUnassignCount}
+                    disabled={pendingBusy || filteredPendingRows.length === 0}
+                  >
+                    {pendingBusy
+                      ? 'Unassigning…'
+                      : `Unassign ${Math.min(
+                          Number(pendingCount) || 0,
+                          filteredPendingRows.length,
+                          MAX_UNASSIGN
+                        )} now`}
+                  </Button>
+                </div>
+              </div>
+
               <div className="flex gap-2 items-center flex-wrap mb-3">
+                <Button
+                  variant="outline"
+                  onClick={toggleAllPending}
+                  disabled={pendingBusy || filteredPendingRows.length === 0}
+                >
+                  {filteredPendingRows.length > 0 &&
+                  filteredPendingRows
+                    .slice(0, MAX_UNASSIGN)
+                    .every(r => selectedPendingIds.includes(r.id))
+                    ? 'Clear selection'
+                    : `Select shown (max ${MAX_UNASSIGN})`}
+                </Button>
                 <Button
                   variant="destructive"
                   onClick={handleUnassign}
@@ -330,7 +443,8 @@ export default function SupervisorAssignView({
                   {pendingBusy ? 'Unassigning…' : `Unassign Selected (${selectedPendingIds.length})`}
                 </Button>
                 <span className="text-xs text-slate-500">
-                  {pendingRows.length} pending row(s) loaded
+                  Showing {filteredPendingRows.length} of {pendingRows.length} pending row(s) · max{' '}
+                  {MAX_UNASSIGN} per action
                 </span>
               </div>
               <div className="max-h-96 overflow-auto border rounded">
@@ -340,8 +454,10 @@ export default function SupervisorAssignView({
                       <TableHead className="w-12">
                         <Checkbox
                           checked={
-                            pendingRows.length > 0 &&
-                            pendingRows.every(r => selectedPendingIds.includes(r.id))
+                            filteredPendingRows.length > 0 &&
+                            filteredPendingRows
+                              .slice(0, MAX_UNASSIGN)
+                              .every(r => selectedPendingIds.includes(r.id))
                           }
                           onCheckedChange={toggleAllPending}
                         />
@@ -353,7 +469,7 @@ export default function SupervisorAssignView({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {pendingRows.map(row => (
+                    {filteredPendingRows.map(row => (
                       <TableRow key={row.id} className={selectedPendingIds.includes(row.id) ? 'bg-blue-50' : ''}>
                         <TableCell>
                           <Checkbox
@@ -371,6 +487,13 @@ export default function SupervisorAssignView({
                         <TableCell className="text-sm whitespace-nowrap">{row.upload_date || '—'}</TableCell>
                       </TableRow>
                     ))}
+                    {filteredPendingRows.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={5} className="text-center py-6 text-slate-500">
+                          No pending rows for this user.
+                        </TableCell>
+                      </TableRow>
+                    )}
                   </TableBody>
                 </Table>
               </div>
