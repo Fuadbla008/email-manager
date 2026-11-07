@@ -1,7 +1,6 @@
 import Link from 'next/link'
 import { requireRole } from '@/lib/auth'
-import { createAdminClient } from '@/lib/supabase/server'
-import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { getSupervisorAssignedRows } from '@/lib/supabase/cached'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -19,20 +18,11 @@ function addToBucket(bucket, row) {
 
 export default async function SupervisorDashboard() {
   const { user } = await requireRole(['supervisor', 'admin'])
-  const admin = createAdminClient()
 
   let rows = []
   let errorMessage = null
   try {
-    rows = await fetchAllRows(() =>
-      admin
-        .from('email_credentials')
-        .select(
-          'assign_date, upload_date, assigned_to, status, verified_status, assigned_profile:profiles!assigned_to(full_name, email)'
-        )
-        .eq('assigned_by', user.id)
-        .order('assign_date', { ascending: true })
-    )
+    rows = await getSupervisorAssignedRows(user.id)
   } catch (error) {
     errorMessage = error.message
   }

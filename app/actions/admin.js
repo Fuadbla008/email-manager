@@ -1,9 +1,10 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, updateTag } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { ROLES, homeForRole } from '@/lib/roles'
+import { CREDENTIAL_CACHE_TAG } from '@/lib/supabase/cached'
 
 async function requireAdmin() {
   const supabase = await createClient()
@@ -32,6 +33,7 @@ function revalidateCredentialViews() {
   revalidatePath('/supervisor/reports')
   revalidatePath('/user')
   revalidatePath('/user/reports')
+  updateTag(CREDENTIAL_CACHE_TAG)
 }
 
 // ============ UPLOAD ============

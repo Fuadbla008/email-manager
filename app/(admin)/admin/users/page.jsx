@@ -1,3 +1,4 @@
+import { connection } from 'next/server'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/server'
 import { buttonVariants } from '@/components/ui/button'
@@ -13,6 +14,7 @@ function todayDhaka() {
 }
 
 export default async function AdminUsersPage() {
+  await connection()
   const supabase = await createClient()
   const today = todayDhaka()
   const { data: { user: currentUser } } = await supabase.auth.getUser()

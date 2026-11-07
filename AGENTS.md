@@ -43,8 +43,13 @@ Supabase access split:
 - `lib/supabase/client.js` — browser client for client-component reads.
 - `lib/supabase/middleware.js` + root `middleware.js` — redirects unauthenticated users to `/login` and routes by `profiles.role` via `homeForRole()` in `lib/roles.js`.
 - `lib/auth.js` — `requireRole(allowedRoles)` server-component guard; redirects to `/login` or the role's home.
+- `lib/supabase/cached.js` — `getSupervisorAssignedRows(supervisorId)` wraps `unstable_cache` (20s, tag `credential-data`) so `/supervisor` and `/supervisor/reports` render from a shared server cache.
+- `lib/client-cache.js` — `sessionStorage` cache (`cacheGet/Set/Update/Delete/RemovePrefix`) for browser-side credential rows. Session-scoped on purpose: passwords must not live in long-term `localStorage`.
+- `lib/csv.js` — `toCsv`/`safeFilename`/`downloadCsv` used by `app/actions/export.js` and client export buttons.
 
-Writes are server actions in `app/actions/*.js` (`'use server'`). Admin actions call `requireAdmin()` (auth + role check) before using the service-role client. Supervisor actions live in `app/actions/supervisor.js` and call `requireSupervisor()` (allows `supervisor` and `admin`). `updateStatus` first checks credential ownership with the user-scoped client, then updates with the service-role client and appends `activity_logs`. Keep this ordering when adding mutations.
+Writes are server actions in `app/actions/*.js` (`'use server'`). Admin actions call `requireAdmin()` (auth + role check) before using the service-role client. Supervisor actions live in `app/actions/supervisor.js` and call `requireSupervisor()` (allows `supervisor` and `admin`). `updateStatus` first checks credential ownership with the user-scoped client, then updates with the service-role client and appends `activity_logs`. Keep this ordering when adding mutations. Credential-mutating actions call `updateTag('credential-data')` via `CREDENTIAL_CACHE_TAG` in `lib/supabase/cached.js` so the supervisor cache is invalidated immediately.
+
+CSV exports are server actions in `app/actions/export.js`: `exportAdminCredentials(filters)` (admin only) and `exportSupervisorCredentials(filters)` (only rows where `assigned_by` is the caller). Both return `{ csv, filename, count }`; the browser downloads them with `downloadCsv`.
 
 Supervisor pages read with the service-role client after a role guard because existing RLS only exposes credentials where `assigned_to = auth.uid()`; the unassigned pool is not visible to a supervisor through RLS.
 
@@ -66,8 +71,10 @@ Reads: server pages query Supabase directly; client CRUD/report pages use the br
 - Upload requires an explicit `upload_date`. The value persists through assignment/unassignment and is the grouping key for `/admin/uploads`; `assign_date` is the date the work is due, not the upload date.
 - Assign supports two flows: manual selection (`assignCredentials`) and quantity-based auto-assign (`assignNextCredentials`, max 500 per click, oldest unassigned first), both optionally scoped to an upload date. The page also accepts `?user=<profile-id>`, `?date=YYYY-MM-DD`, and `?upload=YYYY-MM-DD` presets.
 - Supervisor assignment has its own actions (`supervisorAssignSelected`, `supervisorAssignNext`). They only touch rows where `upload_date` matches and `assigned_to IS NULL`, validate the target profile is `role = 'user'`, and stamp `assigned_by = supervisor.id`.
+- Supervisor unassign (`supervisorUnassign`) only clears rows where `assigned_by` is the caller **and** `status = 'pending'` (max 50 per call). Done/error rows are protected so users cannot lose submitted work; the assign page shows a "Your Pending Assignments" card for this.
+- User status changes and supervisor/admin assign/unassign update local state before awaiting the action (optimistic), then roll back from a snapshot and toast on error. The user tasks page also caches each assignment date in `sessionStorage` and prefetches other dates 3 at a time.
 - Supervisor reports and the overview filter by `assigned_by = current user id`; admins can open the same pages and see their own assignments. `unassignCredentials` clears `assigned_by`.
-- Large list queries are explicitly capped: assign pool `.limit(500)`, dashboard date list `.limit(500)`, supervisor batch-date list `.limit(5000)`, credentials paginated at 50/page. Reports that must cover every row use `lib/supabase/fetch-all.js` in 1000-row pages.
+- Large list queries are explicitly capped: assign pool `.limit(500)`, dashboard date list `.limit(500)`, supervisor batch-date list `.limit(5000)`, supervisor pending list `.limit(500)`, credentials paginated at 50/page. Reports that must cover every row use `lib/supabase/fetch-all.js` in 1000-row pages.
 - Emails are trimmed and lowercased on upload and verify. Preserve normalization on new import/verification paths.
 - Layouts are mobile-first now (`flex-col md:flex-row`, horizontally scrolling nav, `min-w-0` main, `overflow-auto` tables). The user bulk bar uses `left-0 md:left-64` to match the sidebar.
 
@@ -77,4 +84,16 @@ Required vars: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUP
 
 Before deploying code that touches upload dates or supervisors, run `supabase/migrations/20261107000000_upload_date_and_supervisor.sql` in the Supabase SQL editor. Without `upload_date`, `assigned_by`, and the widened role check, upload/assign/supervisor queries fail.
 
+Run `supabase/migrations/20261108000000_performance_indexes.sql` as well. It adds the indexes used by user task lists, date-wise reports, the upload pool, supervisor pending lists, and activity-log pagination.
+
 Supervisor accounts are still created manually in Supabase Auth + `profiles` (same as users). An admin can also promote an existing profile to `supervisor` from `/admin/users`.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+## This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

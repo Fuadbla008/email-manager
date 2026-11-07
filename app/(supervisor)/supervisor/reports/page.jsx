@@ -1,10 +1,10 @@
 import Link from 'next/link'
 import { requireRole } from '@/lib/auth'
-import { createAdminClient } from '@/lib/supabase/server'
-import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import { getSupervisorAssignedRows } from '@/lib/supabase/cached'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import ExportSupervisorButton from './export-button'
 
 function emptyBucket() {
   return {
@@ -35,7 +35,6 @@ function addRow(bucket, row) {
 export default async function SupervisorReportsPage({ searchParams }) {
   const params = await searchParams
   const { user } = await requireRole(['supervisor', 'admin'])
-  const admin = createAdminClient()
 
   const userFilter = params?.user || 'all'
   const fromDate = params?.from || ''
@@ -44,15 +43,7 @@ export default async function SupervisorReportsPage({ searchParams }) {
   let rows = []
   let errorMessage = null
   try {
-    rows = await fetchAllRows(() =>
-      admin
-        .from('email_credentials')
-        .select(
-          'assign_date, upload_date, assigned_to, status, verified_status, assigned_profile:profiles!assigned_to(full_name, email)'
-        )
-        .eq('assigned_by', user.id)
-        .order('assign_date', { ascending: false })
-    )
+    rows = await getSupervisorAssignedRows(user.id)
   } catch (error) {
     errorMessage = error.message
   }
@@ -118,9 +109,12 @@ export default async function SupervisorReportsPage({ searchParams }) {
             Claim vs. verified results for the users you assigned.
           </p>
         </div>
-        <Link href="/supervisor/assign" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-          Assign More
-        </Link>
+        <div className="flex gap-2 flex-wrap">
+          <ExportSupervisorButton userId={userFilter} from={fromDate} to={toDate} />
+          <Link href="/supervisor/assign" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            Assign More
+          </Link>
+        </div>
       </div>
 
       <Card className="mb-4">

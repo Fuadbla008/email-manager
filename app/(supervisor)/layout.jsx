@@ -37,7 +37,11 @@ export default async function SupervisorLayout({ children }) {
           ))}
         </nav>
         <form action={logout} className="mt-3 md:mt-4">
-          <Button variant="outline" type="submit" className="w-full">
+          <Button
+            variant="outline"
+            type="submit"
+            className="w-full border-white/20 bg-white text-slate-900 hover:bg-slate-100 hover:text-slate-900"
+          >
             Logout
           </Button>
         </form>

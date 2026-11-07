@@ -1,3 +1,4 @@
+import { connection } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { Card, CardHeader, CardDescription, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -9,6 +10,7 @@ function todayDhaka() {
 }
 
 export default async function AdminDashboard({ searchParams }) {
+  await connection()
   const params = await searchParams
   const supabase = await createClient()
   const date = params?.date || todayDhaka()

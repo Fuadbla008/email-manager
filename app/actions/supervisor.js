@@ -1,9 +1,10 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, updateTag } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { homeForRole } from '@/lib/roles'
+import { CREDENTIAL_CACHE_TAG } from '@/lib/supabase/cached'
 
 async function requireSupervisor() {
   const supabase = await createClient()
@@ -46,6 +47,7 @@ function revalidateSupervisorViews() {
   revalidatePath('/admin/reports')
   revalidatePath('/user')
   revalidatePath('/user/reports')
+  updateTag(CREDENTIAL_CACHE_TAG)
 }
 
 // ============ ASSIGN SELECTED ROWS ============
@@ -85,6 +87,56 @@ export async function supervisorAssignSelected(credentialIds, userId, date, uplo
 
   revalidateSupervisorViews()
   return { success: true, updated }
+}
+
+// ============ UNASSIGN PENDING ROWS ============
+export async function supervisorUnassign(credentialIds) {
+  const supervisor = await requireSupervisor()
+  const adminSupabase = createAdminClient()
+
+  if (!credentialIds?.length) return { error: 'No credentials selected.' }
+  if (credentialIds.length > 50) {
+    return { error: 'Max 50 per batch. Please split into smaller batches.' }
+  }
+
+  // Only pending rows assigned by this supervisor can be taken back. Done or
+  // error rows keep their result so a user cannot lose submitted work.
+  const { data: owned, error: fetchError } = await adminSupabase
+    .from('email_credentials')
+    .select('id')
+    .in('id', credentialIds)
+    .eq('assigned_by', supervisor.id)
+    .eq('status', 'pending')
+    .not('assigned_to', 'is', null)
+
+  if (fetchError) return { error: fetchError.message }
+  if (!owned?.length) {
+    return { error: 'Only pending credentials you assigned can be unassigned.' }
+  }
+
+  const ids = owned.map(row => row.id)
+  const { error } = await adminSupabase
+    .from('email_credentials')
+    .update({
+      assigned_to: null,
+      assign_date: null,
+      assigned_at: null,
+      assigned_by: null,
+      status: 'pending',
+      completed_at: null,
+    })
+    .in('id', ids)
+    .eq('assigned_by', supervisor.id)
+    .eq('status', 'pending')
+
+  if (error) return { error: error.message }
+
+  revalidateSupervisorViews()
+  return {
+    success: true,
+    updated: ids.length,
+    skipped: credentialIds.length - ids.length,
+  }
 }
 
 // ============ ASSIGN BY QUANTITY ============

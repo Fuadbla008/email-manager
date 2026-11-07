@@ -1,10 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { CheckCircle2, XCircle, Clock } from 'lucide-react'
+import { CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
 import { updateStatus } from '@/app/actions/user'
+import { createClient } from '@/lib/supabase/client'
+import { cacheGet, cacheKey, cacheSet } from '@/lib/client-cache'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -12,6 +13,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+
+const CACHE_TTL = 10 * 60 * 1000
+const ROW_SELECT = 'id, email, password, status, verified_status, completed_at'
+
+function dateCacheKey(userId, date) {
+  return cacheKey('user', userId, 'date', date)
+}
 
 function CopyCell({ value, masked = false }) {
   const [flash, setFlash] = useState(false)
@@ -30,7 +38,7 @@ function CopyCell({ value, masked = false }) {
       type="button"
       onClick={copy}
       title="Click to copy"
-      className={`text-left w-full font-mono text-sm px-2 py-1 rounded transition ${
+      className={`text-left w-full font-mono text-sm px-2 py-1 rounded transition break-all ${
         flash ? 'bg-green-100' : 'hover:bg-slate-100'
       }`}
     >
@@ -62,20 +70,89 @@ function StatusBadge({ status, verified }) {
   )
 }
 
-export default function TasksView({ userEmail, dates, initialDate, initialRows }) {
-  const router = useRouter()
-  const [rows, setRows] = useState(initialRows)
+export default function TasksView({ userId, userEmail, dates, initialDate, initialRows }) {
+  const supabase = useMemo(() => createClient(), [])
+  const [selectedDate, setSelectedDate] = useState(initialDate)
+  const [rowsByDate, setRowsByDate] = useState(() =>
+    initialDate ? { [initialDate]: initialRows } : {}
+  )
+  const [loadingDate, setLoadingDate] = useState(null)
   const [selectedIds, setSelectedIds] = useState([])
   const [filterStatus, setFilterStatus] = useState('all')
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
 
+  const rows = useMemo(
+    () => (selectedDate ? rowsByDate[selectedDate] ?? [] : []),
+    [selectedDate, rowsByDate]
+  )
+
+  // Warm the browser cache for the other dates in the background. Switching
+  // dates later becomes instant instead of waiting for Supabase again.
   useEffect(() => {
-    setRows(initialRows)
+    if (!userId || dates.length <= 1) return
+    let cancelled = false
+
+    async function prefetch() {
+      const missing = dates.filter(
+        date => date !== initialDate && !cacheGet(dateCacheKey(userId, date), { allowStale: true })
+      )
+      for (let i = 0; i < missing.length; i += 3) {
+        await Promise.all(
+          missing.slice(i, i + 3).map(async date => {
+            const { data } = await supabase
+              .from('email_credentials')
+              .select(ROW_SELECT)
+              .eq('assigned_to', userId)
+              .eq('assign_date', date)
+              .order('created_at', { ascending: true })
+            if (!cancelled && data) cacheSet(dateCacheKey(userId, date), data, CACHE_TTL)
+          })
+        )
+      }
+    }
+
+    prefetch()
+    return () => { cancelled = true }
+  }, [dates, initialDate, userId, supabase])
+
+  async function loadDate(date) {
+    setLoadingDate(date)
+    const { data, error } = await supabase
+      .from('email_credentials')
+      .select(ROW_SELECT)
+      .eq('assigned_to', userId)
+      .eq('assign_date', date)
+      .order('created_at', { ascending: true })
+
+    setLoadingDate(current => (current === date ? null : current))
+    if (error) {
+      toast.error(error.message)
+      return
+    }
+    const next = data ?? []
+    setRowsByDate(previous => ({ ...previous, [date]: next }))
+    cacheSet(dateCacheKey(userId, date), next, CACHE_TTL)
+  }
+
+  function changeDate(nextDate) {
+    if (!nextDate || nextDate === selectedDate) return
+    setSelectedDate(nextDate)
     setSelectedIds([])
     setFilterStatus('all')
     setSearch('')
-  }, [initialRows])
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', `/user?date=${nextDate}`)
+    }
+    if (rowsByDate[nextDate]) return
+
+    const cached = cacheGet(dateCacheKey(userId, nextDate), { allowStale: true })
+    if (cached) {
+      setRowsByDate(previous => ({ ...previous, [nextDate]: cached }))
+      return
+    }
+    loadDate(nextDate)
+  }
 
   const stats = useMemo(() => {
     const s = { total: rows.length, pending: 0, done: 0, error: 0 }
@@ -103,23 +180,29 @@ export default function TasksView({ userEmail, dates, initialDate, initialRows }
   }
 
   async function applyStatus(ids, newStatus) {
-    if (ids.length === 0 || busy) return
+    if (ids.length === 0 || busy || !selectedDate) return
+    const current = rowsByDate[selectedDate] ?? []
+    const idSet = new Set(ids)
+    const completedAt = newStatus === 'pending' ? null : new Date().toISOString()
+    const optimistic = current.map(row =>
+      idSet.has(row.id) ? { ...row, status: newStatus, completed_at: completedAt } : row
+    )
+
     setBusy(true)
-    const snapshot = rows
-    setRows(prev => prev.map(r => ids.includes(r.id) ? { ...r, status: newStatus } : r))
+    setRowsByDate(previous => ({ ...previous, [selectedDate]: optimistic }))
+    cacheSet(dateCacheKey(userId, selectedDate), optimistic, CACHE_TTL)
     setSelectedIds([])
+
     const res = await updateStatus(ids, newStatus)
+    setBusy(false)
+
     if (res?.error) {
-      setRows(snapshot)
+      setRowsByDate(previous => ({ ...previous, [selectedDate]: current }))
+      cacheSet(dateCacheKey(userId, selectedDate), current, CACHE_TTL)
       toast.error(res.error)
     } else {
-      toast.success(`Updated ${res.updated} item(s) → ${newStatus}`)
+      toast.success(`Saved ${res.updated} item(s) → ${newStatus}`)
     }
-    setBusy(false)
-  }
-
-  function changeDate(newDate) {
-    router.push(`/user?date=${newDate}`)
   }
 
   if (dates.length === 0) {
@@ -144,12 +227,18 @@ export default function TasksView({ userEmail, dates, initialDate, initialRows }
       <Card className="mb-4">
         <CardContent className="pt-4 flex items-center gap-3 flex-wrap">
           <label className="text-sm font-medium">Date:</label>
-          <Select value={initialDate ?? ''} onValueChange={changeDate}>
+          <Select value={selectedDate ?? ''} onValueChange={changeDate}>
             <SelectTrigger className="w-48"><SelectValue placeholder="Select date" /></SelectTrigger>
             <SelectContent>
               {dates.map(d => <SelectItem key={d} value={d}>{d}</SelectItem>)}
             </SelectContent>
           </Select>
+          {loadingDate === selectedDate && (
+            <span className="text-xs text-slate-500 flex items-center gap-1">
+              <Loader2 size={12} className="animate-spin" /> Loading this date…
+            </span>
+          )}
+          {busy && <span className="text-xs text-slate-500">Saving…</span>}
         </CardContent>
       </Card>
 
@@ -255,7 +344,7 @@ export default function TasksView({ userEmail, dates, initialDate, initialRows }
                 {filtered.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={5} className="text-center py-8 text-slate-500">
-                      No items match.
+                      {loadingDate === selectedDate ? 'Loading…' : 'No items match.'}
                     </TableCell>
                   </TableRow>
                 )}

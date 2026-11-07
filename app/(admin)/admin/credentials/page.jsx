@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
+import { cacheGet, cacheKey, cacheRemovePrefix, cacheSet } from '@/lib/client-cache'
 import { unassignCredentials } from '@/app/actions/admin'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
@@ -17,7 +18,7 @@ const PAGE_SIZE = 50
 const MAX_UNASSIGN = 50
 
 export default function CredentialsPage() {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [rows, setRows] = useState([])
   const [users, setUsers] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
@@ -41,8 +42,25 @@ export default function CredentialsPage() {
 
   useEffect(() => {
     let cancelled = false
-    async function fetchData() {
+    const cacheId = cacheKey(
+      'admin:credentials',
+      filterStatus,
+      filterUser,
+      filterDate,
+      filterUploadDate,
+      search.trim().toLowerCase(),
+      page
+    )
+    const cached = cacheGet(cacheId)
+    if (cached) {
+      setRows(cached.rows)
+      setTotal(cached.total)
+      setLoading(false)
+    } else {
       setLoading(true)
+    }
+
+    async function fetchData() {
       let q = supabase
         .from('email_credentials')
         .select(
@@ -63,10 +81,14 @@ export default function CredentialsPage() {
       if (error) {
         console.error(error)
         toast.error(error.message)
+      } else {
+        const nextRows = data || []
+        const nextTotal = count || 0
+        setRows(nextRows)
+        setTotal(nextTotal)
+        setSelectedIds([])
+        cacheSet(cacheId, { rows: nextRows, total: nextTotal }, 60 * 1000)
       }
-      setRows(data || [])
-      setTotal(count || 0)
-      setSelectedIds([])
       setLoading(false)
     }
     fetchData()
@@ -90,13 +112,23 @@ export default function CredentialsPage() {
       return
     }
     if (!confirm(`Unassign ${selectedIds.length} credentials?`)) return
+    const ids = selectedIds
+    const snapshotRows = rows
+    const snapshotTotal = total
     setBusy(true)
-    const res = await unassignCredentials(selectedIds)
+    setRows(prev => prev.filter(row => !ids.includes(row.id)))
+    setTotal(prev => Math.max(0, prev - ids.length))
+    setSelectedIds([])
+
+    const res = await unassignCredentials(ids)
     setBusy(false)
-    if (res?.error) toast.error(res.error)
-    else {
-      toast.success(`Unassigned ${selectedIds.length}`)
-      setSelectedIds([])
+    if (res?.error) {
+      setRows(snapshotRows)
+      setTotal(snapshotTotal)
+      toast.error(res.error)
+    } else {
+      toast.success(`Unassigned ${ids.length}`)
+      cacheRemovePrefix('admin:credentials')
       setRefreshKey(k => k + 1)
     }
   }

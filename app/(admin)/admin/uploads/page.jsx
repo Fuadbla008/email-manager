@@ -1,3 +1,4 @@
+import { connection } from 'next/server'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/server'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
@@ -27,6 +28,7 @@ function emptyBucket(date) {
 }
 
 export default async function UploadsPage() {
+  await connection()
   const supabase = await createClient()
   const today = todayDhaka()
 

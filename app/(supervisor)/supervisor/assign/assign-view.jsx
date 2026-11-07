@@ -3,7 +3,11 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import { supervisorAssignSelected, supervisorAssignNext } from '@/app/actions/supervisor'
+import {
+  supervisorAssignSelected,
+  supervisorAssignNext,
+  supervisorUnassign,
+} from '@/app/actions/supervisor'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -12,29 +16,41 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Checkbox } from '@/components/ui/checkbox'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
+const MAX_UNASSIGN = 50
+
 export default function SupervisorAssignView({
   users,
   pool,
+  pendingRows: initialPendingRows,
   uploadDate,
   assignDate: initialAssignDate,
   availableDates,
   remaining,
 }) {
   const router = useRouter()
+  const [poolRows, setPoolRows] = useState(pool)
+  const [pendingRows, setPendingRows] = useState(initialPendingRows)
   const [selectedUser, setSelectedUser] = useState('')
   const [assignDate, setAssignDate] = useState(initialAssignDate)
   const [selectedIds, setSelectedIds] = useState([])
+  const [selectedPendingIds, setSelectedPendingIds] = useState([])
   const [search, setSearch] = useState('')
   const [quickCount, setQuickCount] = useState('30')
   const [busy, setBusy] = useState(false)
+  const [pendingBusy, setPendingBusy] = useState(false)
 
-  const filtered = pool.filter(r =>
+  const filtered = poolRows.filter(r =>
     !search.trim() || r.email.toLowerCase().includes(search.toLowerCase())
   )
 
   function changeUploadDate(value) {
     if (!value) return
     router.push(`/supervisor/assign?upload=${value}`)
+  }
+
+  function userLabel(userId) {
+    const user = users.find(u => u.id === userId)
+    return user?.full_name || user?.email || 'Unknown user'
   }
 
   function toggle(id) {
@@ -48,6 +64,26 @@ export default function SupervisorAssignView({
     else setSelectedIds(prev => Array.from(new Set([...prev, ...ids])))
   }
 
+  function togglePending(id) {
+    setSelectedPendingIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    )
+  }
+
+  function toggleAllPending() {
+    const ids = pendingRows.map(p => p.id)
+    const all = ids.length > 0 && ids.every(id => selectedPendingIds.includes(id))
+    setSelectedPendingIds(all ? [] : ids)
+  }
+
+  function addAssignedToPending(assignedRows) {
+    if (assignedRows.length === 0) return
+    setPendingRows(prev => {
+      const existing = new Set(prev.map(row => row.id))
+      return [...assignedRows.filter(row => !existing.has(row.id)), ...prev]
+    })
+  }
+
   async function handleAssign() {
     if (!selectedUser || !assignDate) {
       toast.error('Select a user and an assign date.')
@@ -57,15 +93,33 @@ export default function SupervisorAssignView({
       toast.error('Select at least one credential.')
       return
     }
+    const ids = selectedIds
+    const taken = poolRows.filter(row => ids.includes(row.id))
     setBusy(true)
-    const res = await supervisorAssignSelected(selectedIds, selectedUser, assignDate, uploadDate)
+    setPoolRows(prev => prev.filter(row => !ids.includes(row.id)))
+    setSelectedIds([])
+
+    const res = await supervisorAssignSelected(ids, selectedUser, assignDate, uploadDate)
     setBusy(false)
-    if (res?.error) toast.error(res.error)
-    else {
-      toast.success(`Assigned ${res.updated} credential(s).`)
-      setSelectedIds([])
-      router.refresh()
+    if (res?.error) {
+      setPoolRows(prev => [...taken, ...prev])
+      toast.error(res.error)
+      return
     }
+
+    addAssignedToPending(taken.map(row => ({
+      id: row.id,
+      email: row.email,
+      upload_date: row.upload_date,
+      assign_date: assignDate,
+      assigned_to: selectedUser,
+      assigned_profile: {
+        full_name: users.find(u => u.id === selectedUser)?.full_name || null,
+        email: users.find(u => u.id === selectedUser)?.email || null,
+      },
+    })))
+    toast.success(`Assigned ${res.updated} credential(s).`)
+    router.refresh()
   }
 
   async function handleQuickAssign() {
@@ -89,6 +143,46 @@ export default function SupervisorAssignView({
       setSelectedIds([])
       router.refresh()
     }
+  }
+
+  async function handleUnassign() {
+    if (selectedPendingIds.length === 0) return
+    if (selectedPendingIds.length > MAX_UNASSIGN) {
+      toast.error(`Max ${MAX_UNASSIGN} per action. Selected: ${selectedPendingIds.length}`)
+      return
+    }
+    if (!confirm(`Unassign ${selectedPendingIds.length} pending credential(s)?`)) return
+
+    const ids = selectedPendingIds
+    const snapshot = pendingRows
+    const taken = snapshot.filter(row => ids.includes(row.id))
+    setPendingBusy(true)
+    setPendingRows(prev => prev.filter(row => !ids.includes(row.id)))
+    setSelectedPendingIds([])
+
+    const res = await supervisorUnassign(ids)
+    setPendingBusy(false)
+
+    if (res?.error) {
+      setPendingRows(snapshot)
+      toast.error(res.error)
+      return
+    }
+
+    // Rows from the currently open upload batch go straight back into the pool.
+    const returned = taken
+      .filter(row => row.upload_date === uploadDate)
+      .map(row => ({ id: row.id, email: row.email, upload_date: row.upload_date }))
+    if (returned.length > 0) {
+      setPoolRows(prev => {
+        const existing = new Set(prev.map(row => row.id))
+        return [...returned.filter(row => !existing.has(row.id)), ...prev]
+      })
+    }
+
+    toast.success(`Unassigned ${res.updated} pending credential(s).`)
+    if (res.skipped) toast.message(`${res.skipped} row(s) were skipped (not pending or not yours).`)
+    router.refresh()
   }
 
   return (
@@ -212,10 +306,83 @@ export default function SupervisorAssignView({
         </CardContent>
       </Card>
 
+      <Card className="mb-4">
+        <CardHeader>
+          <CardTitle>Your Pending Assignments</CardTitle>
+          <CardDescription>
+            Take back pending credentials you assigned. Done/error rows cannot be unassigned.
+            Max {MAX_UNASSIGN} per action.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {pendingRows.length === 0 ? (
+            <p className="text-sm text-slate-500 py-4 text-center">
+              No pending credentials assigned by you.
+            </p>
+          ) : (
+            <>
+              <div className="flex gap-2 items-center flex-wrap mb-3">
+                <Button
+                  variant="destructive"
+                  onClick={handleUnassign}
+                  disabled={pendingBusy || selectedPendingIds.length === 0}
+                >
+                  {pendingBusy ? 'Unassigning…' : `Unassign Selected (${selectedPendingIds.length})`}
+                </Button>
+                <span className="text-xs text-slate-500">
+                  {pendingRows.length} pending row(s) loaded
+                </span>
+              </div>
+              <div className="max-h-96 overflow-auto border rounded">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-white z-10">
+                    <TableRow>
+                      <TableHead className="w-12">
+                        <Checkbox
+                          checked={
+                            pendingRows.length > 0 &&
+                            pendingRows.every(r => selectedPendingIds.includes(r.id))
+                          }
+                          onCheckedChange={toggleAllPending}
+                        />
+                      </TableHead>
+                      <TableHead>Email</TableHead>
+                      <TableHead>User</TableHead>
+                      <TableHead>Assign Date</TableHead>
+                      <TableHead>Upload Date</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pendingRows.map(row => (
+                      <TableRow key={row.id} className={selectedPendingIds.includes(row.id) ? 'bg-blue-50' : ''}>
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedPendingIds.includes(row.id)}
+                            onCheckedChange={() => togglePending(row.id)}
+                          />
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{row.email}</TableCell>
+                        <TableCell>
+                          {row.assigned_profile?.full_name ||
+                            row.assigned_profile?.email ||
+                            userLabel(row.assigned_to)}
+                        </TableCell>
+                        <TableCell className="text-sm whitespace-nowrap">{row.assign_date || '—'}</TableCell>
+                        <TableCell className="text-sm whitespace-nowrap">{row.upload_date || '—'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>
-            Unassigned Pool — {uploadDate} ({filtered.length} shown / {pool.length} loaded)
+            Unassigned Pool — {uploadDate} ({filtered.length} shown / {poolRows.length} loaded)
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -243,7 +410,7 @@ export default function SupervisorAssignView({
                       />
                     </TableCell>
                     <TableCell className="font-mono text-sm">{r.email}</TableCell>
-                    <TableCell className="text-sm text-slate-500">{r.upload_date || '—'}</TableCell>
+                    <TableCell className="text-sm text-slate-500 whitespace-nowrap">{r.upload_date || '—'}</TableCell>
                   </TableRow>
                 ))}
                 {filtered.length === 0 && (

@@ -1,10 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import * as XLSX from 'xlsx'
 import { toast } from 'sonner'
 import { createClient } from '@/lib/supabase/client'
+import { cacheGet, cacheSet } from '@/lib/client-cache'
+import { downloadCsv } from '@/lib/csv'
+import { exportAdminCredentials } from '@/app/actions/export'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -56,7 +59,7 @@ function aggregate(rows, groupKeyFn) {
 }
 
 export default function ReportsPage() {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [users, setUsers] = useState([])
 
   const [date, setDate] = useState('')
@@ -73,6 +76,7 @@ export default function ReportsPage() {
   const [dUser, setDUser] = useState('all')
   const [disc, setDisc] = useState([])
   const [loadingDisc, setLoadingDisc] = useState(false)
+  const [exportingDetail, setExportingDetail] = useState(false)
 
   useEffect(() => {
     const t = todayDhaka()
@@ -83,30 +87,48 @@ export default function ReportsPage() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
     supabase.from('profiles').select('id, full_name, email').eq('role', 'user')
-      .then(({ data }) => setUsers(data || []))
+      .then(({ data }) => { if (!cancelled) setUsers(data || []) })
+    return () => { cancelled = true }
   }, [supabase])
 
   // Tab 1: Per date
   useEffect(() => {
     if (!date) return
-    setLoadingDate(true)
+    const key = `admin:report:date:${date}`
+    const cached = cacheGet(key)
+    if (cached) setPerDate(cached)
+    else setLoadingDate(true)
+
+    let cancelled = false
     supabase
       .from('email_credentials')
       .select('assigned_to, status, verified_status, profiles!assigned_to(full_name, email)')
       .eq('assign_date', date)
       .not('assigned_to', 'is', null)
       .then(({ data, error }) => {
+        if (cancelled) return
         if (error) toast.error(error.message)
-        else setPerDate(aggregate(data || [], r => r.assigned_to))
+        else {
+          const next = aggregate(data || [], r => r.assigned_to)
+          setPerDate(next)
+          cacheSet(key, next, 60 * 1000)
+        }
         setLoadingDate(false)
       })
+    return () => { cancelled = true }
   }, [date, supabase])
 
   // Tab 2: Per user
   useEffect(() => {
     if (!userId || !fromDate || !toDate) { setPerUser([]); return }
-    setLoadingUser(true)
+    const key = `admin:report:user:${userId}:${fromDate}:${toDate}`
+    const cached = cacheGet(key)
+    if (cached) setPerUser(cached)
+    else setLoadingUser(true)
+
+    let cancelled = false
     supabase
       .from('email_credentials')
       .select('assign_date, status, verified_status, profiles!assigned_to(full_name, email)')
@@ -114,20 +136,28 @@ export default function ReportsPage() {
       .gte('assign_date', fromDate)
       .lte('assign_date', toDate)
       .then(({ data, error }) => {
+        if (cancelled) return
         if (error) toast.error(error.message)
         else {
           const arr = aggregate(data || [], r => r.assign_date)
             .sort((a, b) => String(b.key).localeCompare(String(a.key)))
           setPerUser(arr)
+          cacheSet(key, arr, 60 * 1000)
         }
         setLoadingUser(false)
       })
+    return () => { cancelled = true }
   }, [userId, fromDate, toDate, supabase])
 
   // Tab 3: Discrepancies
   useEffect(() => {
     if (!dDate) return
-    setLoadingDisc(true)
+    const key = `admin:report:disc:${dDate}:${dUser}`
+    const cached = cacheGet(key)
+    if (cached) setDisc(cached)
+    else setLoadingDisc(true)
+
+    let cancelled = false
     let q = supabase
       .from('email_credentials')
       .select('id, email, status, verified_status, assign_date, assigned_to, profiles!assigned_to(full_name, email)')
@@ -135,11 +165,27 @@ export default function ReportsPage() {
       .not('verified_status', 'is', null)
     if (dUser !== 'all') q = q.eq('assigned_to', dUser)
     q.then(({ data, error }) => {
+      if (cancelled) return
       if (error) toast.error(error.message)
-      else setDisc((data || []).filter(r => r.status !== r.verified_status))
+      else {
+        const next = (data || []).filter(r => r.status !== r.verified_status)
+        setDisc(next)
+        cacheSet(key, next, 60 * 1000)
+      }
       setLoadingDisc(false)
     })
+    return () => { cancelled = true }
   }, [dDate, dUser, supabase])
+
+  async function downloadDetail(filters) {
+    if (exportingDetail) return
+    setExportingDetail(true)
+    const res = await exportAdminCredentials(filters)
+    setExportingDetail(false)
+    if (res?.error) return toast.error(res.error)
+    downloadCsv(res.filename, res.csv)
+    toast.success(`Downloaded ${res.count} row(s)`)
+  }
 
   function exportPerDate() {
     if (perDate.length === 0) return toast.error('No data')
@@ -223,6 +269,13 @@ export default function ReportsPage() {
                 <Input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-48" />
               </div>
               <Button onClick={exportPerDate} disabled={perDate.length === 0}>Export Excel</Button>
+              <Button
+                variant="outline"
+                onClick={() => downloadDetail({ date })}
+                disabled={exportingDetail || !date}
+              >
+                {exportingDetail ? 'Preparing…' : 'Export Detail CSV'}
+              </Button>
             </CardContent>
           </Card>
           <Card>
@@ -291,6 +344,13 @@ export default function ReportsPage() {
                 <Input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="w-40" />
               </div>
               <Button onClick={exportPerUser} disabled={perUser.length === 0}>Export Excel</Button>
+              <Button
+                variant="outline"
+                onClick={() => downloadDetail({ userId, from: fromDate, to: toDate })}
+                disabled={exportingDetail || !userId}
+              >
+                {exportingDetail ? 'Preparing…' : 'Export Detail CSV'}
+              </Button>
             </CardContent>
           </Card>
           <Card>

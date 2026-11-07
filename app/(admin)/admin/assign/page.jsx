@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { assignCredentials, assignNextCredentials } from '@/app/actions/admin'
 import { Button } from '@/components/ui/button'
@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { toast } from 'sonner'
 
 export default function AssignPage() {
-  const supabase = createClient()
+  const supabase = useMemo(() => createClient(), [])
   const [users, setUsers] = useState([])
   const [pool, setPool] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
@@ -90,13 +90,18 @@ export default function AssignPage() {
       toast.error('Select user, date, and at least one credential.')
       return
     }
+    const ids = selectedIds
+    const snapshot = pool
     setBusy(true)
-    const res = await assignCredentials(selectedIds, selectedUser, date, uploadDate)
+    setPool(prev => prev.filter(row => !ids.includes(row.id)))
+    setSelectedIds([])
+    const res = await assignCredentials(ids, selectedUser, date, uploadDate)
     setBusy(false)
-    if (res?.error) toast.error(res.error)
-    else {
+    if (res?.error) {
+      setPool(snapshot)
+      toast.error(res.error)
+    } else {
       toast.success(`Assigned ${res.updated} credentials to user.`)
-      setSelectedIds([])
       await fetchPool(uploadDate)
     }
   }

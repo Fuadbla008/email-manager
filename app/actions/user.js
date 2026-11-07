@@ -1,7 +1,8 @@
 'use server'
 
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath } from 'next/cache'
+import { revalidatePath, updateTag } from 'next/cache'
+import { CREDENTIAL_CACHE_TAG } from '@/lib/supabase/cached'
 
 export async function updateStatus(credentialIds, newStatus) {
   if (!['pending', 'done', 'error'].includes(newStatus)) {
@@ -52,5 +53,7 @@ export async function updateStatus(credentialIds, newStatus) {
   revalidatePath('/admin/users')
   revalidatePath('/admin/activity')
   revalidatePath('/admin/reports')
+  // Drop the short-lived supervisor dashboard cache so counts change instantly.
+  updateTag(CREDENTIAL_CACHE_TAG)
   return { success: true, updated: validIds.length }
 }

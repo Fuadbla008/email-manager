@@ -1,3 +1,4 @@
+import { connection } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { createAdminClient } from '@/lib/supabase/server'
 import SupervisorAssignView from './assign-view'
@@ -9,8 +10,9 @@ function todayDhaka() {
 }
 
 export default async function SupervisorAssignPage({ searchParams }) {
+  await connection()
   const params = await searchParams
-  await requireRole(['supervisor', 'admin'])
+  const { user } = await requireRole(['supervisor', 'admin'])
   const admin = createAdminClient()
 
   const today = todayDhaka()
@@ -21,6 +23,7 @@ export default async function SupervisorAssignPage({ searchParams }) {
     { data: pool },
     { count: remaining },
     { data: dateRows },
+    { data: pendingRows },
   ] = await Promise.all([
     admin
       .from('profiles')
@@ -46,6 +49,16 @@ export default async function SupervisorAssignPage({ searchParams }) {
       .not('upload_date', 'is', null)
       .order('upload_date', { ascending: false })
       .limit(5000),
+    admin
+      .from('email_credentials')
+      .select(
+        'id, email, assign_date, upload_date, assigned_to, assigned_profile:profiles!assigned_to(full_name, email)'
+      )
+      .eq('assigned_by', user.id)
+      .eq('status', 'pending')
+      .not('assigned_to', 'is', null)
+      .order('assign_date', { ascending: false })
+      .limit(500),
   ])
 
   const availableDates = Array.from(
@@ -57,6 +70,7 @@ export default async function SupervisorAssignPage({ searchParams }) {
       key={uploadDate}
       users={users ?? []}
       pool={pool ?? []}
+      pendingRows={pendingRows ?? []}
       uploadDate={uploadDate}
       assignDate={uploadDate}
       availableDates={availableDates}
