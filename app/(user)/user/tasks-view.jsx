@@ -6,6 +6,7 @@ import { CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
 import { updateStatus } from '@/app/actions/user'
 import { createClient } from '@/lib/supabase/client'
 import { cacheGet, cacheKey, cacheSet } from '@/lib/client-cache'
+import CompletionBar from '@/components/completion-bar'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -268,6 +269,16 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
           </CardContent>
         </Card>
       </div>
+
+      <Card className="mb-4">
+        <CardContent className="pt-4">
+          <div className="flex items-center justify-between text-xs text-slate-500 mb-2 gap-2">
+            <span>Completion</span>
+            <span>{stats.done + stats.error} of {stats.total} finished</span>
+          </div>
+          <CompletionBar done={stats.done} error={stats.error} total={stats.total} />
+        </CardContent>
+      </Card>
 
       <Card className="mb-4">
         <CardContent className="pt-4 flex flex-col md:flex-row gap-3 md:items-center">

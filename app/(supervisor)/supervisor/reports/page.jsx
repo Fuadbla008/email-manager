@@ -1,6 +1,8 @@
 import Link from 'next/link'
+import { connection } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getSupervisorAssignedRows } from '@/lib/supabase/cached'
+import CompletionBar from '@/components/completion-bar'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -33,6 +35,7 @@ function addRow(bucket, row) {
 }
 
 export default async function SupervisorReportsPage({ searchParams }) {
+  await connection()
   const params = await searchParams
   const { user } = await requireRole(['supervisor', 'admin'])
 
@@ -222,6 +225,7 @@ export default async function SupervisorReportsPage({ searchParams }) {
                   <TableHead>Not Verified</TableHead>
                   <TableHead>Match</TableHead>
                   <TableHead>Mismatch</TableHead>
+                  <TableHead className="w-40">Progress</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -241,11 +245,14 @@ export default async function SupervisorReportsPage({ searchParams }) {
                     <TableCell>{row.notVerified}</TableCell>
                     <TableCell className="text-green-600">{row.match}</TableCell>
                     <TableCell className="text-orange-600 font-bold">{row.mismatch}</TableCell>
+                    <TableCell>
+                      <CompletionBar done={row.done} error={row.error} total={row.total} />
+                    </TableCell>
                   </TableRow>
                 ))}
                 {userRows.length === 0 && !errorMessage && (
                   <TableRow>
-                    <TableCell colSpan={10} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={11} className="text-center py-8 text-slate-500">
                       No users match this report.
                     </TableCell>
                   </TableRow>
@@ -275,6 +282,7 @@ export default async function SupervisorReportsPage({ searchParams }) {
                   <TableHead>Verified ✗</TableHead>
                   <TableHead>Match</TableHead>
                   <TableHead>Mismatch</TableHead>
+                  <TableHead className="w-40">Progress</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -289,11 +297,14 @@ export default async function SupervisorReportsPage({ searchParams }) {
                     <TableCell>{row.verifiedError}</TableCell>
                     <TableCell className="text-green-600">{row.match}</TableCell>
                     <TableCell className="text-orange-600 font-bold">{row.mismatch}</TableCell>
+                    <TableCell>
+                      <CompletionBar done={row.done} error={row.error} total={row.total} />
+                    </TableCell>
                   </TableRow>
                 ))}
                 {dateRows.length === 0 && !errorMessage && (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={10} className="text-center py-8 text-slate-500">
                       No dates match this report.
                     </TableCell>
                   </TableRow>
@@ -322,6 +333,7 @@ export default async function SupervisorReportsPage({ searchParams }) {
                   <TableHead>Error</TableHead>
                   <TableHead>Match</TableHead>
                   <TableHead>Mismatch</TableHead>
+                  <TableHead className="w-40">Progress</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -335,11 +347,14 @@ export default async function SupervisorReportsPage({ searchParams }) {
                     <TableCell className="text-red-600">{row.error}</TableCell>
                     <TableCell className="text-green-600">{row.match}</TableCell>
                     <TableCell className="text-orange-600 font-bold">{row.mismatch}</TableCell>
+                    <TableCell>
+                      <CompletionBar done={row.done} error={row.error} total={row.total} />
+                    </TableCell>
                   </TableRow>
                 ))}
                 {detailRows.length === 0 && !errorMessage && (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-8 text-slate-500">
+                    <TableCell colSpan={9} className="text-center py-8 text-slate-500">
                       No detail rows.
                     </TableCell>
                   </TableRow>

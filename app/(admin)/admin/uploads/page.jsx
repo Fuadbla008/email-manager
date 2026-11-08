@@ -2,6 +2,8 @@ import { connection } from 'next/server'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/server'
 import { fetchAllRows } from '@/lib/supabase/fetch-all'
+import CompletionBar from '@/components/completion-bar'
+import { completionPct } from '@/lib/progress'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -68,7 +70,10 @@ export default async function UploadsPage() {
     error: acc.error + b.error,
     pending: acc.pending + b.pending,
   }), { uploaded: 0, assigned: 0, unassigned: 0, done: 0, error: 0, pending: 0 })
-  const overallPct = totals.uploaded > 0 ? Math.round((totals.done / totals.uploaded) * 100) : 0
+  // Completion is measured against assigned work: done + error are finished,
+  // pending is the only remaining work. Unassigned rows are shown separately.
+  const overallBase = totals.assigned > 0 ? totals.assigned : totals.uploaded
+  const overallPct = completionPct(totals.done, totals.error, overallBase)
 
   return (
     <div>
@@ -112,7 +117,7 @@ export default async function UploadsPage() {
         </Card>
         <Card>
           <CardHeader className="pb-2">
-            <CardDescription>Completion</CardDescription>
+            <CardDescription>Completion (of assigned)</CardDescription>
             <CardTitle className="text-3xl">{overallPct}%</CardTitle>
           </CardHeader>
         </Card>
@@ -144,7 +149,7 @@ export default async function UploadsPage() {
               </TableHeader>
               <TableBody>
                 {buckets.map(b => {
-                  const pct = b.uploaded > 0 ? Math.round((b.done / b.uploaded) * 100) : 0
+                  const base = b.assigned > 0 ? b.assigned : b.uploaded
                   return (
                     <TableRow key={b.date}>
                       <TableCell className="font-medium whitespace-nowrap">{b.date}</TableCell>
@@ -157,12 +162,7 @@ export default async function UploadsPage() {
                       <TableCell>{b.verifiedDone}</TableCell>
                       <TableCell>{b.verifiedError}</TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-2 bg-slate-200 rounded">
-                            <div className="h-2 bg-green-500 rounded" style={{ width: `${pct}%` }} />
-                          </div>
-                          <span className="text-xs text-slate-500">{pct}%</span>
-                        </div>
+                        <CompletionBar done={b.done} error={b.error} total={base} />
                       </TableCell>
                     </TableRow>
                   )

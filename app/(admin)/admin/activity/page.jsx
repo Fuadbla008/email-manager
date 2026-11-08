@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { connection } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,6 +40,7 @@ function activityHref({ user, status, page }) {
 }
 
 export default async function ActivityPage({ searchParams }) {
+  await connection()
   const params = await searchParams
   const page = Math.max(0, Number.parseInt(params?.page ?? '0', 10) || 0)
   const userFilter = params?.user ?? 'all'

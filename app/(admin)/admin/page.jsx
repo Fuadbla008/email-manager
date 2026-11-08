@@ -1,5 +1,6 @@
 import { connection } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import CompletionBar from '@/components/completion-bar'
 import { Card, CardHeader, CardDescription, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
@@ -144,6 +145,9 @@ export default async function AdminDashboard({ searchParams }) {
               <div className="text-2xl font-bold text-red-600">{counts.error}</div>
             </div>
           </div>
+          <div className="mt-4">
+            <CompletionBar done={counts.done} error={counts.error} total={counts.total} />
+          </div>
         </CardContent>
       </Card>
 
@@ -165,26 +169,18 @@ export default async function AdminDashboard({ searchParams }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {userStats.map(u => {
-                const pct = u.total > 0 ? Math.round((u.done / u.total) * 100) : 0
-                return (
-                  <TableRow key={u.id}>
-                    <TableCell className="font-medium">{u.name}</TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-2 bg-slate-200 rounded">
-                          <div className="h-2 bg-green-500 rounded" style={{ width: `${pct}%` }} />
-                        </div>
-                        <span className="text-xs text-slate-500">{pct}%</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>{u.total}</TableCell>
-                    <TableCell className="text-green-600">{u.done}</TableCell>
-                    <TableCell className="text-yellow-600">{u.pending}</TableCell>
-                    <TableCell className="text-red-600">{u.error}</TableCell>
-                  </TableRow>
-                )
-              })}
+              {userStats.map(u => (
+                <TableRow key={u.id}>
+                  <TableCell className="font-medium">{u.name}</TableCell>
+                  <TableCell>
+                    <CompletionBar done={u.done} error={u.error} total={u.total} />
+                  </TableCell>
+                  <TableCell>{u.total}</TableCell>
+                  <TableCell className="text-green-600">{u.done}</TableCell>
+                  <TableCell className="text-yellow-600">{u.pending}</TableCell>
+                  <TableCell className="text-red-600">{u.error}</TableCell>
+                </TableRow>
+              ))}
               {userStats.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={6} className="text-center py-6 text-slate-500">

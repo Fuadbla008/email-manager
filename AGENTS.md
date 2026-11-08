@@ -19,6 +19,7 @@ Email/password batch management app: admins upload credentials by CSV against an
 - `next.config.mjs` enables React Compiler, `cacheComponents`, `partialPrefetching`, and a Turbopack CSS loader. There is no `tailwind.config.*`.
 - Because `cacheComponents` is on, pages reading `cookies()`/`searchParams` must be behind Suspense or opt out with `export const instant = false`. The root page and `(admin)`/`(user)`/`(supervisor)` layouts already do this; removing it makes `npm run build` fail.
 - A page that only reads the clock (e.g. a default date) still gets statically prerendered; call `await connection()` from `next/server` before `new Date()` in that page. `app/(admin)/admin/upload/page.jsx` does this.
+- Supabase auth-js calls `Date.now()` internally for token expiry. Any server layout/page that calls `requireRole()`/`auth.getUser()` must `await connection()` first (the root page and all three role layouts do), otherwise `npm run build` fails with "encountered the unstable value Date.now() while prerendering".
 - Tailwind v4 theme lives in `app/globals.css` (`@import "tailwindcss"` + `shadcn/tailwind.css`). Use CSS variables, not a JS theme config.
 - UI components are shadcn `base-nova` built on `@base-ui/react` primitives (not Radix). `cn` is re-exported from the `cn` package in `lib/utils.js`. Keep `tsx: false` in `components.json`.
 - `date-fns` is not installed despite mentions in external notes; use native `Date`/`Intl` or add the dependency explicitly.
@@ -46,6 +47,8 @@ Supabase access split:
 - `lib/supabase/cached.js` — `getSupervisorAssignedRows(supervisorId)` wraps `unstable_cache` (20s, tag `credential-data`) so `/supervisor` and `/supervisor/reports` render from a shared server cache.
 - `lib/client-cache.js` — `sessionStorage` cache (`cacheGet/Set/Update/Delete/RemovePrefix`) for browser-side credential rows. Session-scoped on purpose: passwords must not live in long-term `localStorage`.
 - `lib/csv.js` — `toCsv`/`safeFilename`/`downloadCsv` used by `app/actions/export.js` and client export buttons.
+- `components/network-refresh.jsx` — mounted in all three role layouts; listens for the browser `online` event and calls `router.refresh()` so VPN/network switches don't leave stale empty/error pages.
+- `lib/supabase/middleware.js` — clears dead refresh-token cookies, and treats transient auth/profile errors as "let the request through" instead of redirecting, which prevents redirect loops and "page not found" after network changes.
 
 Writes are server actions in `app/actions/*.js` (`'use server'`). Admin actions call `requireAdmin()` (auth + role check) before using the service-role client. Supervisor actions live in `app/actions/supervisor.js` and call `requireSupervisor()` (allows `supervisor` and `admin`). `updateStatus` first checks credential ownership with the user-scoped client, then updates with the service-role client and appends `activity_logs`. Keep this ordering when adding mutations. Credential-mutating actions call `updateTag('credential-data')` via `CREDENTIAL_CACHE_TAG` in `lib/supabase/cached.js` so the supervisor cache is invalidated immediately.
 
@@ -76,6 +79,7 @@ Reads: server pages query Supabase directly; client CRUD/report pages use the br
 - Supervisor reports and the overview filter by `assigned_by = current user id`; admins can open the same pages and see their own assignments. `unassignCredentials` clears `assigned_by`.
 - Large list queries are explicitly capped: assign pool `.limit(500)`, dashboard date list `.limit(500)`, supervisor batch-date list `.limit(5000)`, supervisor pending list `.limit(500)`, credentials paginated at 50/page. Reports that must cover every row use `lib/supabase/fetch-all.js` in 1000-row pages.
 - Emails are trimmed and lowercased on upload and verify. Preserve normalization on new import/verification paths.
+- **Completion semantics:** a row is complete when its status is `done` **or** `error`; only `pending` is incomplete. So 80 done/error out of 100 assigned shows 80% complete with 20% pending. Use `lib/progress.js` (`completionPct`, `completionWidths`) and `components/completion-bar.jsx` (green done / red error / grey pending) instead of hand-rolling `done / total`. Upload-batch progress uses `assigned` as the denominator when any rows are assigned, otherwise `uploaded`; unassigned rows are shown separately.
 - Layouts are mobile-first now (`flex-col md:flex-row`, horizontally scrolling nav, `min-w-0` main, `overflow-auto` tables). The user bulk bar uses `left-0 md:left-64` to match the sidebar.
 
 ## Environment

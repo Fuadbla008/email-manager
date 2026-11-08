@@ -1,6 +1,7 @@
 import { connection } from 'next/server'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
+import CompletionBar from '@/components/completion-bar'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
@@ -59,6 +60,7 @@ export default async function UserReportsPage() {
                   <TableHead>Your Done</TableHead>
                   <TableHead>Pending</TableHead>
                   <TableHead>Error</TableHead>
+                  <TableHead className="w-40">Progress</TableHead>
                   <TableHead>Verified ✓</TableHead>
                   <TableHead>Verified ✗</TableHead>
                   <TableHead>Not Verified</TableHead>
@@ -74,6 +76,9 @@ export default async function UserReportsPage() {
                     <TableCell className="text-green-600">{r.done}</TableCell>
                     <TableCell className="text-yellow-600">{r.pending}</TableCell>
                     <TableCell className="text-red-600">{r.error}</TableCell>
+                    <TableCell>
+                      <CompletionBar done={r.done} error={r.error} total={r.total} />
+                    </TableCell>
                     <TableCell>{r.verified_done}</TableCell>
                     <TableCell>{r.verified_error}</TableCell>
                     <TableCell>{r.not_verified}</TableCell>

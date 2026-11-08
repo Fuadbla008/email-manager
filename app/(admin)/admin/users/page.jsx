@@ -1,6 +1,8 @@
 import { connection } from 'next/server'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase/server'
+import CompletionBar from '@/components/completion-bar'
+import { completionPct } from '@/lib/progress'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -51,7 +53,6 @@ export default async function AdminUsersPage() {
       error: errorCount,
       pending: Math.max(0, total - done - errorCount),
       today: todayRes.count ?? 0,
-      pct: total > 0 ? Math.round((done / total) * 100) : 0,
     }
   }))
 
@@ -67,7 +68,7 @@ export default async function AdminUsersPage() {
     pending: acc.pending + u.pending,
     error: acc.error + u.error,
   }), { total: 0, done: 0, pending: 0, error: 0 })
-  const overallPct = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0
+  const overallPct = completionPct(totals.done, totals.error, totals.total)
 
   return (
     <div>
@@ -164,12 +165,7 @@ export default async function AdminUsersPage() {
                     <TableCell className="text-green-600">{u.done}</TableCell>
                     <TableCell className="text-red-600">{u.error}</TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1 h-2 bg-slate-200 rounded">
-                          <div className="h-2 bg-green-500 rounded" style={{ width: `${u.pct}%` }} />
-                        </div>
-                        <span className="text-xs text-slate-500">{u.pct}%</span>
-                      </div>
+                      <CompletionBar done={u.done} error={u.error} total={u.total} />
                     </TableCell>
                     <TableCell>
                       {u.role === 'user' ? (

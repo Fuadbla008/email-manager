@@ -1,6 +1,9 @@
 import Link from 'next/link'
+import { connection } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getSupervisorAssignedRows } from '@/lib/supabase/cached'
+import CompletionBar from '@/components/completion-bar'
+import { completionPct } from '@/lib/progress'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -17,6 +20,7 @@ function addToBucket(bucket, row) {
 }
 
 export default async function SupervisorDashboard() {
+  await connection()
   const { user } = await requireRole(['supervisor', 'admin'])
 
   let rows = []
@@ -49,7 +53,7 @@ export default async function SupervisorDashboard() {
 
   const dateRows = Array.from(perDate.values()).sort((a, b) => String(b.label).localeCompare(String(a.label)))
   const userRows = Array.from(perUser.values()).sort((a, b) => b.total - a.total)
-  const pct = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0
+  const pct = completionPct(totals.done, totals.error, totals.total)
 
   return (
     <div>
@@ -95,6 +99,14 @@ export default async function SupervisorDashboard() {
             <CardDescription>Completion</CardDescription>
             <CardTitle className="text-3xl">{pct}%</CardTitle>
           </CardHeader>
+          <CardContent className="pt-0">
+            <CompletionBar
+              done={totals.done}
+              error={totals.error}
+              total={totals.total}
+              showLabel={false}
+            />
+          </CardContent>
         </Card>
       </div>
 
@@ -114,6 +126,7 @@ export default async function SupervisorDashboard() {
                     <TableHead>Done</TableHead>
                     <TableHead>Pending</TableHead>
                     <TableHead>Error</TableHead>
+                    <TableHead className="w-40">Progress</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -124,11 +137,14 @@ export default async function SupervisorDashboard() {
                       <TableCell className="text-green-600">{row.done}</TableCell>
                       <TableCell className="text-yellow-600">{row.pending}</TableCell>
                       <TableCell className="text-red-600">{row.error}</TableCell>
+                      <TableCell>
+                        <CompletionBar done={row.done} error={row.error} total={row.total} />
+                      </TableCell>
                     </TableRow>
                   ))}
                   {userRows.length === 0 && !errorMessage && (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center py-8 text-slate-500">
+                      <TableCell colSpan={6} className="text-center py-8 text-slate-500">
                         You have not assigned any credentials yet.
                       </TableCell>
                     </TableRow>
@@ -154,6 +170,7 @@ export default async function SupervisorDashboard() {
                     <TableHead>Done</TableHead>
                     <TableHead>Pending</TableHead>
                     <TableHead>Error</TableHead>
+                    <TableHead className="w-40">Progress</TableHead>
                     <TableHead>Verified</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -165,12 +182,15 @@ export default async function SupervisorDashboard() {
                       <TableCell className="text-green-600">{row.done}</TableCell>
                       <TableCell className="text-yellow-600">{row.pending}</TableCell>
                       <TableCell className="text-red-600">{row.error}</TableCell>
+                      <TableCell>
+                        <CompletionBar done={row.done} error={row.error} total={row.total} />
+                      </TableCell>
                       <TableCell>{row.verifiedDone + row.verifiedError}</TableCell>
                     </TableRow>
                   ))}
                   {dateRows.length === 0 && !errorMessage && (
                     <TableRow>
-                      <TableCell colSpan={6} className="text-center py-8 text-slate-500">
+                      <TableCell colSpan={7} className="text-center py-8 text-slate-500">
                         No assignment dates yet.
                       </TableCell>
                     </TableRow>

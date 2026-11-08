@@ -8,6 +8,7 @@ import { createClient } from '@/lib/supabase/client'
 import { cacheGet, cacheSet } from '@/lib/client-cache'
 import { downloadCsv } from '@/lib/csv'
 import { exportAdminCredentials } from '@/app/actions/export'
+import CompletionBar from '@/components/completion-bar'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -293,6 +294,7 @@ export default function ReportsPage() {
                     <TableHead>Not Verified</TableHead>
                     <TableHead>Match</TableHead>
                     <TableHead>Mismatch</TableHead>
+                    <TableHead className="w-40">Progress</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -308,11 +310,14 @@ export default function ReportsPage() {
                       <TableCell>{r.not_verified}</TableCell>
                       <TableCell className="text-green-600">{r.match}</TableCell>
                       <TableCell className="text-orange-600 font-bold">{r.mismatch}</TableCell>
+                      <TableCell>
+                        <CompletionBar done={r.done} error={r.error} total={r.total} />
+                      </TableCell>
                     </TableRow>
                   ))}
                   {perDate.length === 0 && !loadingDate && (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center py-6 text-slate-500">
+                      <TableCell colSpan={11} className="text-center py-6 text-slate-500">
                         No data for {date}
                       </TableCell>
                     </TableRow>
@@ -367,6 +372,7 @@ export default function ReportsPage() {
                     <TableHead>Verified ✗</TableHead>
                     <TableHead>Match</TableHead>
                     <TableHead>Mismatch</TableHead>
+                    <TableHead className="w-40">Progress</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -381,11 +387,14 @@ export default function ReportsPage() {
                       <TableCell>{r.verified_error}</TableCell>
                       <TableCell className="text-green-600">{r.match}</TableCell>
                       <TableCell className="text-orange-600 font-bold">{r.mismatch}</TableCell>
+                      <TableCell>
+                        <CompletionBar done={r.done} error={r.error} total={r.total} />
+                      </TableCell>
                     </TableRow>
                   ))}
                   {perUser.length === 0 && !loadingUser && (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center py-6 text-slate-500">
+                      <TableCell colSpan={10} className="text-center py-6 text-slate-500">
                         {userId ? 'No data for selected range' : 'Select a user and date range'}
                       </TableCell>
                     </TableRow>

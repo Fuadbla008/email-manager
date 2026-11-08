@@ -1,7 +1,9 @@
 import Link from 'next/link'
+import { connection } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { logout } from '@/app/actions/auth'
 import { Button } from '@/components/ui/button'
+import NetworkRefresh from '@/components/network-refresh'
 import { LayoutDashboard, UserPlus, BarChart3 } from 'lucide-react'
 
 // Supervisor pages use cookies and live Supabase data; opt out of instant
@@ -15,10 +17,14 @@ const nav = [
 ]
 
 export default async function SupervisorLayout({ children }) {
+  // Supabase auth reads the clock while validating tokens; force request-time
+  // rendering so prerendering never touches Date.now().
+  await connection()
   const { profile } = await requireRole(['supervisor', 'admin'])
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
+      <NetworkRefresh />
       <aside className="w-full md:w-64 md:min-h-screen bg-slate-900 text-white p-4 flex flex-col">
         <h1 className="text-xl font-bold mb-1">Supervisor Panel</h1>
         <p className="text-xs text-slate-400 mb-4 md:mb-6 truncate">

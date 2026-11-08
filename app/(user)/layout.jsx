@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { logout } from '@/app/actions/auth'
 import { Button } from '@/components/ui/button'
+import NetworkRefresh from '@/components/network-refresh'
 import { ListTodo, BarChart3 } from 'lucide-react'
 
 // User pages use cookies and live Supabase data; opt the whole segment out of
@@ -15,6 +16,7 @@ const nav = [
 export default function UserLayout({ children }) {
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
+      <NetworkRefresh />
       <aside className="w-full md:w-64 md:min-h-screen bg-slate-900 text-white p-4 flex flex-col">
         <h1 className="text-xl font-bold mb-4 md:mb-6">User Panel</h1>
         <nav className="flex md:flex-col gap-1 overflow-x-auto pb-2 md:pb-0 md:flex-1">
