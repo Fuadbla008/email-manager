@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
 import { updateStatus } from '@/app/actions/user'
@@ -18,18 +18,30 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 const CACHE_TTL = 10 * 60 * 1000
 const ROW_SELECT = 'id, email, password, status, verified_status, completed_at'
 
+// The email cell is tinted with the row's current status. Pending is yellow,
+// done is green and error is red, so the table is scannable at a glance.
+const STATUS_BG = {
+  pending: 'bg-yellow-100',
+  done: 'bg-green-100',
+  error: 'bg-red-100',
+}
+
+const STATUS_BORDER = {
+  pending: 'border-l-yellow-400',
+  done: 'border-l-green-400',
+  error: 'border-l-red-400',
+}
+
 function dateCacheKey(userId, date) {
   return cacheKey('user', userId, 'date', date)
 }
 
-function CopyCell({ value, masked = false }) {
-  const [flash, setFlash] = useState(false)
+function CopyCell({ value, masked = false, onCopied, flash = false, className = '' }) {
   async function copy() {
     try {
       await navigator.clipboard.writeText(value)
-      setFlash(true)
-      toast.success(masked ? 'Password copied' : 'Email copied')
-      setTimeout(() => setFlash(false), 600)
+      onCopied?.()
+      toast.success(masked ? 'Password copied' : 'Email copied', { duration: 1200 })
     } catch {
       toast.error('Copy failed')
     }
@@ -39,9 +51,9 @@ function CopyCell({ value, masked = false }) {
       type="button"
       onClick={copy}
       title="Click to copy"
-      className={`text-left w-full font-mono text-sm px-2 py-1 rounded transition break-all ${
-        flash ? 'bg-green-100' : 'hover:bg-slate-100'
-      }`}
+      className={`text-left w-full font-mono text-sm px-2 py-1 rounded transition-colors duration-200 break-all ${
+        flash ? 'bg-green-200 text-green-900' : 'hover:bg-slate-100'
+      } ${className}`}
     >
       {masked ? '••••••••' : value}
     </button>
@@ -71,17 +83,82 @@ function StatusBadge({ status, verified }) {
   )
 }
 
+function TaskRow({ row, selected, saving, onToggle, onStatusChange }) {
+  const [copied, setCopied] = useState(null)
+  const timer = useRef(null)
+
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current)
+  }, [])
+
+  function markCopied(field) {
+    setCopied(field)
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setCopied(null), 800)
+  }
+
+  // Copying either the email or the password flashes the email cell green,
+  // which makes it obvious which row was just picked up.
+  const emailFlash = copied === 'email' || copied === 'password'
+  const passwordFlash = copied === 'password'
+
+  return (
+    <TableRow className={selected ? 'bg-blue-50' : ''}>
+      <TableCell>
+        <Checkbox checked={selected} onCheckedChange={onToggle} />
+      </TableCell>
+      <TableCell
+        className={`p-0 border-l-4 ${STATUS_BORDER[row.status] ?? 'border-l-transparent'}`}
+      >
+        <CopyCell
+          value={row.email}
+          onCopied={() => markCopied('email')}
+          flash={emailFlash}
+          className={emailFlash ? '' : (STATUS_BG[row.status] ?? '')}
+        />
+      </TableCell>
+      <TableCell className="p-0">
+        <CopyCell
+          value={row.password}
+          masked
+          onCopied={() => markCopied('password')}
+          flash={passwordFlash}
+        />
+      </TableCell>
+      <TableCell><StatusBadge status={row.status} verified={row.verified_status} /></TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <Select value={row.status} onValueChange={onStatusChange} disabled={saving}>
+            <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="pending">Pending</SelectItem>
+              <SelectItem value="done">Done</SelectItem>
+              <SelectItem value="error">Error</SelectItem>
+            </SelectContent>
+          </Select>
+          {saving && <Loader2 size={14} className="animate-spin text-slate-400" />}
+        </div>
+      </TableCell>
+    </TableRow>
+  )
+}
+
 export default function TasksView({ userId, userEmail, dates, initialDate, initialRows }) {
   const supabase = useMemo(() => createClient(), [])
   const [selectedDate, setSelectedDate] = useState(initialDate)
+  // Both start from the same server payload. The ref is the synchronous source
+  // of truth for event handlers; the state drives rendering. `commitDateRows`
+  // keeps them in lockstep after every change.
   const [rowsByDate, setRowsByDate] = useState(() =>
     initialDate ? { [initialDate]: initialRows } : {}
   )
+  const rowsRef = useRef(initialDate ? { [initialDate]: initialRows } : {})
   const [loadingDate, setLoadingDate] = useState(null)
   const [selectedIds, setSelectedIds] = useState([])
   const [filterStatus, setFilterStatus] = useState('all')
   const [search, setSearch] = useState('')
-  const [busy, setBusy] = useState(false)
+  const savingRef = useRef(new Set())
+  const [savingIds, setSavingIds] = useState(() => new Set())
 
   const rows = useMemo(
     () => (selectedDate ? rowsByDate[selectedDate] ?? [] : []),
@@ -117,6 +194,24 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     return () => { cancelled = true }
   }, [dates, initialDate, userId, supabase])
 
+  // Keep the ref, React state and session cache in lockstep. Doing this in one
+  // helper means concurrent optimistic updates never read a stale snapshot.
+  function commitDateRows(date, nextRows) {
+    rowsRef.current = { ...rowsRef.current, [date]: nextRows }
+    setRowsByDate(rowsRef.current)
+    cacheSet(dateCacheKey(userId, date), nextRows, CACHE_TTL)
+  }
+
+  function setSaving(ids, saving) {
+    const next = new Set(savingRef.current)
+    ids.forEach(id => {
+      if (saving) next.add(id)
+      else next.delete(id)
+    })
+    savingRef.current = next
+    setSavingIds(next)
+  }
+
   async function loadDate(date) {
     setLoadingDate(date)
     const { data, error } = await supabase
@@ -131,9 +226,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
       toast.error(error.message)
       return
     }
-    const next = data ?? []
-    setRowsByDate(previous => ({ ...previous, [date]: next }))
-    cacheSet(dateCacheKey(userId, date), next, CACHE_TTL)
+    commitDateRows(date, data ?? [])
   }
 
   function changeDate(nextDate) {
@@ -145,11 +238,11 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', `/user?date=${nextDate}`)
     }
-    if (rowsByDate[nextDate]) return
+    if (rowsRef.current[nextDate]) return
 
     const cached = cacheGet(dateCacheKey(userId, nextDate), { allowStale: true })
     if (cached) {
-      setRowsByDate(previous => ({ ...previous, [nextDate]: cached }))
+      commitDateRows(nextDate, cached)
       return
     }
     loadDate(nextDate)
@@ -180,31 +273,77 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     else setSelectedIds(prev => Array.from(new Set([...prev, ...ids])))
   }
 
+  /**
+   * Optimistic + concurrent status update.
+   *
+   * Every row gets its own in-flight marker, so changing one row never blocks
+   * another. If a request fails, only the rows from that request are rolled
+   * back — other in-flight/successful changes are left untouched.
+   */
   async function applyStatus(ids, newStatus) {
-    if (ids.length === 0 || busy || !selectedDate) return
-    const current = rowsByDate[selectedDate] ?? []
-    const idSet = new Set(ids)
+    if (!selectedDate) return
+    const date = selectedDate
+    const unique = Array.from(new Set(ids)).filter(id => !savingRef.current.has(id))
+    if (unique.length === 0) return
+
+    const current = rowsRef.current[date] ?? []
+    const idSet = new Set(unique)
+    const previous = new Map()
+    current.forEach(row => {
+      if (idSet.has(row.id)) previous.set(row.id, row)
+    })
+    if (previous.size === 0) return
+
     const completedAt = newStatus === 'pending' ? null : new Date().toISOString()
     const optimistic = current.map(row =>
       idSet.has(row.id) ? { ...row, status: newStatus, completed_at: completedAt } : row
     )
 
-    setBusy(true)
-    setRowsByDate(previous => ({ ...previous, [selectedDate]: optimistic }))
-    cacheSet(dateCacheKey(userId, selectedDate), optimistic, CACHE_TTL)
-    setSelectedIds([])
+    commitDateRows(date, optimistic)
+    setSaving(unique, true)
+    setSelectedIds(prev => prev.filter(id => !idSet.has(id)))
 
-    const res = await updateStatus(ids, newStatus)
-    setBusy(false)
+    const res = await updateStatus(unique, newStatus)
+    setSaving(unique, false)
 
     if (res?.error) {
-      setRowsByDate(previous => ({ ...previous, [selectedDate]: current }))
-      cacheSet(dateCacheKey(userId, selectedDate), current, CACHE_TTL)
-      toast.error(res.error)
-    } else {
-      toast.success(`Saved ${res.updated} item(s) → ${newStatus}`)
+      revertRows(date, idSet, previous, newStatus, completedAt)
+      toast.error(res.error, { duration: 3500 })
+      return
     }
+
+    // The server may have skipped rows that no longer belong to the user.
+    const updatedSet = new Set(res.updatedIds ?? unique)
+    if (updatedSet.size !== unique.length) {
+      revertRows(date, idSet, previous, newStatus, completedAt, updatedSet)
+    }
+
+    toast.success(
+      unique.length === 1
+        ? `Marked ${newStatus}`
+        : `${res.updated} item(s) → ${newStatus}`,
+      { id: `status-${date}-${newStatus}`, duration: 1400 }
+    )
   }
+
+  function revertRows(date, idSet, previous, newStatus, completedAt, keep = null) {
+    const latest = rowsRef.current[date] ?? []
+    let changed = false
+    const reverted = latest.map(row => {
+      if (!idSet.has(row.id)) return row
+      if (keep && keep.has(row.id)) return row
+      // Only revert a row that still shows this request's optimistic value,
+      // so a newer user action is never overwritten.
+      if (row.status !== newStatus || row.completed_at !== completedAt) return row
+      const before = previous.get(row.id)
+      if (!before) return row
+      changed = true
+      return { ...row, status: before.status, completed_at: before.completed_at }
+    })
+    if (changed) commitDateRows(date, reverted)
+  }
+
+  const pendingSelected = selectedIds.filter(id => !savingIds.has(id))
 
   if (dates.length === 0) {
     return (
@@ -239,7 +378,11 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
               <Loader2 size={12} className="animate-spin" /> Loading this date…
             </span>
           )}
-          {busy && <span className="text-xs text-slate-500">Saving…</span>}
+          {savingIds.size > 0 && (
+            <span className="text-xs text-slate-500 flex items-center gap-1">
+              <Loader2 size={12} className="animate-spin" /> Saving {savingIds.size}…
+            </span>
+          )}
         </CardContent>
       </Card>
 
@@ -333,24 +476,14 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
               </TableHeader>
               <TableBody>
                 {filtered.map(r => (
-                  <TableRow key={r.id} className={selectedIds.includes(r.id) ? 'bg-blue-50' : ''}>
-                    <TableCell>
-                      <Checkbox checked={selectedIds.includes(r.id)} onCheckedChange={() => toggleOne(r.id)} />
-                    </TableCell>
-                    <TableCell className="p-0"><CopyCell value={r.email} /></TableCell>
-                    <TableCell className="p-0"><CopyCell value={r.password} masked /></TableCell>
-                    <TableCell><StatusBadge status={r.status} verified={r.verified_status} /></TableCell>
-                    <TableCell>
-                      <Select value={r.status} onValueChange={(v) => applyStatus([r.id], v)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="pending">Pending</SelectItem>
-                          <SelectItem value="done">Done</SelectItem>
-                          <SelectItem value="error">Error</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                  </TableRow>
+                  <TaskRow
+                    key={r.id}
+                    row={r}
+                    selected={selectedIds.includes(r.id)}
+                    saving={savingIds.has(r.id)}
+                    onToggle={() => toggleOne(r.id)}
+                    onStatusChange={(value) => applyStatus([r.id], value)}
+                  />
                 ))}
                 {filtered.length === 0 && (
                   <TableRow>
@@ -367,15 +500,33 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
 
       {selectedIds.length > 0 && (
         <div className="fixed bottom-0 left-0 md:left-64 right-0 bg-slate-900 text-white py-3 px-3 md:px-6 flex flex-wrap gap-2 items-center justify-between shadow-lg z-20">
-          <span className="text-sm">{selectedIds.length} selected</span>
+          <span className="text-sm">
+            {selectedIds.length} selected
+            {savingIds.size > 0 && ` · ${savingIds.size} saving`}
+          </span>
           <div className="flex gap-2 flex-wrap">
-            <Button size="sm" variant="secondary" onClick={() => applyStatus(selectedIds, 'done')} disabled={busy}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => applyStatus(pendingSelected, 'done')}
+              disabled={pendingSelected.length === 0}
+            >
               Mark Done
             </Button>
-            <Button size="sm" variant="secondary" onClick={() => applyStatus(selectedIds, 'error')} disabled={busy}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => applyStatus(pendingSelected, 'error')}
+              disabled={pendingSelected.length === 0}
+            >
               Mark Error
             </Button>
-            <Button size="sm" variant="secondary" onClick={() => applyStatus(selectedIds, 'pending')} disabled={busy}>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => applyStatus(pendingSelected, 'pending')}
+              disabled={pendingSelected.length === 0}
+            >
               Mark Pending
             </Button>
             <Button size="sm" variant="ghost" className="text-white hover:bg-slate-800" onClick={() => setSelectedIds([])}>

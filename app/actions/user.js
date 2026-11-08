@@ -1,7 +1,8 @@
 'use server'
 
+import { after } from 'next/server'
 import { createClient, createAdminClient } from '@/lib/supabase/server'
-import { revalidatePath, updateTag } from 'next/cache'
+import { updateTag } from 'next/cache'
 import { CREDENTIAL_CACHE_TAG } from '@/lib/supabase/cached'
 
 export async function updateStatus(credentialIds, newStatus) {
@@ -15,6 +16,8 @@ export async function updateStatus(credentialIds, newStatus) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return { error: 'Not authenticated' }
 
+  // Ownership is checked with the user-scoped client first; the actual write
+  // then uses the service-role client so RLS cannot silently drop it.
   const { data: owned, error: fetchErr } = await supabase
     .from('email_credentials')
     .select('id, status')
@@ -36,24 +39,22 @@ export async function updateStatus(credentialIds, newStatus) {
 
   if (updateErr) return { error: updateErr.message }
 
+  // The audit log is important but must not delay the user's optimistic UI.
+  // `after` runs it once the action response has been sent.
   const logs = owned.map(o => ({
     user_id: user.id,
     credential_id: o.id,
     old_status: o.status,
     new_status: newStatus,
   }))
-  await admin.from('activity_logs').insert(logs)
+  after(async () => {
+    const { error: logErr } = await admin.from('activity_logs').insert(logs)
+    if (logErr) console.error('activity_logs insert failed:', logErr.message)
+  })
 
-  revalidatePath('/user')
-  revalidatePath('/user/reports')
-  // Supervisors and admins see claim/verification progress for these rows.
-  revalidatePath('/supervisor')
-  revalidatePath('/supervisor/reports')
-  revalidatePath('/admin')
-  revalidatePath('/admin/users')
-  revalidatePath('/admin/activity')
-  revalidatePath('/admin/reports')
-  // Drop the short-lived supervisor dashboard cache so counts change instantly.
+  // Supervisor overview/reports read through this tag. Everything else in the
+  // app is request-time data, so per-path revalidation would only add latency.
   updateTag(CREDENTIAL_CACHE_TAG)
-  return { success: true, updated: validIds.length }
+
+  return { success: true, updated: validIds.length, updatedIds: validIds }
 }

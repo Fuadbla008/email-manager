@@ -1,6 +1,5 @@
 import Link from 'next/link'
-import { logout } from '@/app/actions/auth'
-import { Button } from '@/components/ui/button'
+import LogoutButton from '@/components/logout-button'
 import NetworkRefresh from '@/components/network-refresh'
 import { ListTodo, BarChart3 } from 'lucide-react'
 
@@ -31,15 +30,9 @@ export default function UserLayout({ children }) {
             </Link>
           ))}
         </nav>
-        <form action={logout} className="mt-3 md:mt-4">
-          <Button
-            variant="outline"
-            type="submit"
-            className="w-full border-white/20 bg-white text-slate-900 hover:bg-slate-100 hover:text-slate-900"
-          >
-            Logout
-          </Button>
-        </form>
+        <div className="mt-3 md:mt-4">
+          <LogoutButton />
+        </div>
       </aside>
       <main className="flex-1 min-w-0 p-3 md:p-6 bg-slate-50">{children}</main>
     </div>

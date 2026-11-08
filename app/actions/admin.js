@@ -20,19 +20,14 @@ async function requireAdmin() {
   return user
 }
 
-// Revalidate every surface that shows assignment/verification counts.
+// Revalidate the server-rendered count surfaces. Client-side pages (assign,
+// credentials, reports) refresh their own data, so revalidating them would only
+// force an unnecessary router refresh and make the action feel slower.
 function revalidateCredentialViews() {
   revalidatePath('/admin')
-  revalidatePath('/admin/assign')
-  revalidatePath('/admin/credentials')
   revalidatePath('/admin/uploads')
   revalidatePath('/admin/users')
-  revalidatePath('/admin/reports')
-  revalidatePath('/supervisor')
-  revalidatePath('/supervisor/assign')
-  revalidatePath('/supervisor/reports')
-  revalidatePath('/user')
-  revalidatePath('/user/reports')
+  revalidatePath('/admin/activity')
   updateTag(CREDENTIAL_CACHE_TAG)
 }
 

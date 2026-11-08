@@ -37,16 +37,9 @@ async function assertAssignableUser(adminSupabase, userId) {
 
 function revalidateSupervisorViews() {
   revalidatePath('/supervisor')
-  revalidatePath('/supervisor/assign')
-  revalidatePath('/supervisor/reports')
   revalidatePath('/admin')
-  revalidatePath('/admin/assign')
   revalidatePath('/admin/uploads')
-  revalidatePath('/admin/credentials')
   revalidatePath('/admin/users')
-  revalidatePath('/admin/reports')
-  revalidatePath('/user')
-  revalidatePath('/user/reports')
   updateTag(CREDENTIAL_CACHE_TAG)
 }
 

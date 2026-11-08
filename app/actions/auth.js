@@ -9,10 +9,14 @@ export async function login(formData) {
   const password = String(formData.get('password') ?? '')
 
   const supabase = await createClient()
-  const { error } = await supabase.auth.signInWithPassword({ email, password })
+  // signInWithPassword already returns the authenticated user, so there is no
+  // need for a second `getUser()` round trip before the profile lookup.
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
   if (error) return { error: error.message }
 
-  const { data: { user } } = await supabase.auth.getUser()
+  const user = data?.user
+  if (!user) return { error: 'Could not start a session. Please try again.' }
+
   const { data: profile } = await supabase
     .from('profiles')
     .select('role')
@@ -20,10 +24,4 @@ export async function login(formData) {
     .single()
 
   redirect(homeForRole(profile?.role))
-}
-
-export async function logout() {
-  const supabase = await createClient()
-  await supabase.auth.signOut()
-  redirect('/login')
 }
