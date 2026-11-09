@@ -2,10 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import { CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
+import { CheckCircle2, XCircle, Clock, Loader2, CloudUpload } from 'lucide-react'
 import { updateStatus } from '@/app/actions/user'
 import { createClient } from '@/lib/supabase/client'
 import { cacheGet, cacheKey, cacheSet } from '@/lib/client-cache'
+import {
+  applyPending,
+  enqueueStatus,
+  pendingEntries,
+  readQueue,
+  removePendingIfUnchanged,
+} from '@/lib/pending-status'
 import CompletionBar from '@/components/completion-bar'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,7 +23,9 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
 const CACHE_TTL = 10 * 60 * 1000
-const ROW_SELECT = 'id, email, password, status, verified_status, completed_at'
+const ROW_SELECT =
+  'id, email, password, status, verified_status, completed_at, error_number_verify, error_locked'
+const FLUSH_CHUNK = 500
 
 // The email cell is tinted with the row's current status. Pending is yellow,
 // done is green and error is red, so the table is scannable at a glance.
@@ -83,7 +92,29 @@ function StatusBadge({ status, verified }) {
   )
 }
 
-function TaskRow({ row, selected, saving, onToggle, onStatusChange }) {
+function ErrorFlags({ row, onFlagChange }) {
+  if (row.status !== 'error') return null
+  return (
+    <div className="mt-2 space-y-1">
+      <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+        <Checkbox
+          checked={!!row.error_number_verify}
+          onCheckedChange={checked => onFlagChange('error_number_verify', checked === true)}
+        />
+        Number verify
+      </label>
+      <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none">
+        <Checkbox
+          checked={!!row.error_locked}
+          onCheckedChange={checked => onFlagChange('error_locked', checked === true)}
+        />
+        Locked
+      </label>
+    </div>
+  )
+}
+
+function TaskRow({ row, selected, pending, onToggle, onStatusChange, onFlagChange }) {
   const [copied, setCopied] = useState(null)
   const timer = useRef(null)
 
@@ -126,9 +157,9 @@ function TaskRow({ row, selected, saving, onToggle, onStatusChange }) {
         />
       </TableCell>
       <TableCell><StatusBadge status={row.status} verified={row.verified_status} /></TableCell>
-      <TableCell>
+      <TableCell className="w-48">
         <div className="flex items-center gap-2">
-          <Select value={row.status} onValueChange={onStatusChange} disabled={saving}>
+          <Select value={row.status} onValueChange={onStatusChange}>
             <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="pending">Pending</SelectItem>
@@ -136,8 +167,9 @@ function TaskRow({ row, selected, saving, onToggle, onStatusChange }) {
               <SelectItem value="error">Error</SelectItem>
             </SelectContent>
           </Select>
-          {saving && <Loader2 size={14} className="animate-spin text-slate-400" />}
+          {pending && <Loader2 size={14} className="animate-spin text-slate-400" />}
         </div>
+        <ErrorFlags row={row} onFlagChange={onFlagChange} />
       </TableCell>
     </TableRow>
   )
@@ -157,13 +189,289 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
   const [selectedIds, setSelectedIds] = useState([])
   const [filterStatus, setFilterStatus] = useState('all')
   const [search, setSearch] = useState('')
-  const savingRef = useRef(new Set())
-  const [savingIds, setSavingIds] = useState(() => new Set())
+  const [pendingIds, setPendingIds] = useState(() => new Set())
+
+  // Background sync state. `busy` prevents overlapping flushes; `dirty` means
+  // a new change arrived while a flush was in flight, so run again after it.
+  const flushRef = useRef({ busy: false, dirty: false, attempt: 0 })
+  const retryTimer = useRef(null)
 
   const rows = useMemo(
     () => (selectedDate ? rowsByDate[selectedDate] ?? [] : []),
     [selectedDate, rowsByDate]
   )
+
+  // Keep the ref, React state and session cache in lockstep. Doing this in one
+  // helper means concurrent optimistic updates never read a stale snapshot.
+  function commitDateRows(date, nextRows) {
+    rowsRef.current = { ...rowsRef.current, [date]: nextRows }
+    setRowsByDate(rowsRef.current)
+    cacheSet(dateCacheKey(userId, date), nextRows, CACHE_TTL)
+  }
+
+  function scheduleRetry() {
+    if (retryTimer.current) return
+    const attempt = flushRef.current.attempt
+    const delay = Math.min(5000 * 2 ** attempt, 120000)
+    flushRef.current.attempt = Math.min(attempt + 1, 5)
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null
+      flushQueue()
+    }, delay)
+  }
+
+  function clearRetry() {
+    if (retryTimer.current) {
+      clearTimeout(retryTimer.current)
+      retryTimer.current = null
+    }
+  }
+
+  function revertSkipped(snapshot, skippedIds) {
+    if (skippedIds.size === 0) return
+    const next = { ...rowsRef.current }
+    const changedDates = []
+
+    for (const date of Object.keys(next)) {
+      const current = next[date]
+      let changed = false
+      const mapped = current.map(row => {
+        if (!skippedIds.has(row.id)) return row
+        const entry = snapshot[row.id]
+        if (!entry?.prev) return row
+        changed = true
+        return {
+          ...row,
+          status: entry.prev.status,
+          error_number_verify: !!entry.prev.error_number_verify,
+          error_locked: !!entry.prev.error_locked,
+          completed_at: entry.prev.completed_at ?? null,
+        }
+      })
+      if (changed) {
+        next[date] = mapped
+        changedDates.push(date)
+      }
+    }
+
+    if (changedDates.length > 0) {
+      rowsRef.current = next
+      setRowsByDate(next)
+      changedDates.forEach(date =>
+        cacheSet(dateCacheKey(userId, date), next[date], CACHE_TTL)
+      )
+    }
+  }
+
+  /**
+   * Send the localStorage queue to the server.
+   *
+   * The UI never waits for this: changes are already in localStorage and on
+   * screen. Confirmed rows leave the queue; failed rows stay for a retry.
+   */
+  async function flushQueue() {
+    if (!userId) return
+    if (flushRef.current.busy) {
+      flushRef.current.dirty = true
+      return
+    }
+
+    const snapshot = readQueue(userId)
+    const entries = Object.values(snapshot).slice(0, FLUSH_CHUNK)
+    if (entries.length === 0) return
+
+    flushRef.current.busy = true
+    flushRef.current.dirty = false
+    let continueFlush = false
+    let failed = false
+
+    try {
+      const res = await updateStatus(
+        entries.map(entry => ({
+          id: entry.id,
+          status: entry.status,
+          error_number_verify: entry.error_number_verify,
+          error_locked: entry.error_locked,
+        }))
+      )
+
+      if (!res) {
+        failed = true
+        toast.error('Could not save changes. They are kept on this device.', {
+          id: 'status-sync-error',
+          duration: 3000,
+        })
+        scheduleRetry()
+        return
+      }
+
+      // Skipped rows are no longer assigned to this user. Remove them from the
+      // queue and roll the UI back before deciding whether a retry is needed.
+      let skippedCount = 0
+      if (res.skippedIds?.length) {
+        const removedSkipped = removePendingIfUnchanged(userId, snapshot, res.skippedIds)
+        skippedCount = removedSkipped.length
+        if (removedSkipped.length > 0) {
+          setPendingIds(prev => {
+            const next = new Set(prev)
+            removedSkipped.forEach(id => next.delete(id))
+            return next
+          })
+          revertSkipped(snapshot, new Set(removedSkipped))
+        }
+        toast.error('Some items are no longer assigned to you; those changes were not saved.', {
+          id: 'status-sync-skipped',
+          duration: 4000,
+        })
+      }
+
+      const updatedIds = res.updatedIds ?? []
+      if (res.error && updatedIds.length === 0) {
+        // If every entry was rejected as unowned, there is nothing left to
+        // retry; otherwise keep the queue for the next attempt.
+        if (skippedCount < entries.length) {
+          failed = true
+          toast.error(res.error, { id: 'status-sync-error', duration: 3000 })
+          scheduleRetry()
+        } else {
+          flushRef.current.attempt = 0
+          clearRetry()
+        }
+        return
+      }
+
+      const removed = removePendingIfUnchanged(userId, snapshot, updatedIds)
+      if (removed.length > 0) {
+        setPendingIds(prev => {
+          const next = new Set(prev)
+          removed.forEach(id => next.delete(id))
+          return next
+        })
+      }
+
+      if (res.error) {
+        failed = true
+        toast.error(res.error, { id: 'status-sync-error', duration: 3000 })
+        scheduleRetry()
+      } else {
+        flushRef.current.attempt = 0
+        clearRetry()
+        const saved = (res.updatedIds ?? []).length
+        if (saved > 0) {
+          toast.success(saved === 1 ? 'Change saved' : `${saved} changes saved`, {
+            id: 'status-sync',
+            duration: 1200,
+          })
+        }
+        continueFlush =
+          entries.length === FLUSH_CHUNK && pendingEntries(userId).length > 0
+      }
+    } catch {
+      failed = true
+      toast.error('Saved on this device. Will retry when the connection is back.', {
+        id: 'status-sync-offline',
+        duration: 3000,
+      })
+      scheduleRetry()
+    } finally {
+      flushRef.current.busy = false
+      if ((flushRef.current.dirty && !failed) || continueFlush) flushQueue()
+    }
+  }
+
+  /**
+   * Optimistic write: update the screen, persist to localStorage, then flush.
+   * Every row is independent, so a slow request never blocks another row.
+   */
+  function commitUpdates(date, updates) {
+    const current = rowsRef.current[date] ?? []
+    const byId = new Map(updates.map(update => [update.id, update]))
+    let changed = false
+
+    const next = current.map(row => {
+      const update = byId.get(row.id)
+      if (!update) return row
+      changed = true
+      return {
+        ...row,
+        status: update.status,
+        error_number_verify: update.error_number_verify,
+        error_locked: update.error_locked,
+        completed_at:
+          update.status === 'pending'
+            ? null
+            : (row.completed_at ?? new Date().toISOString()),
+      }
+    })
+
+    if (changed) commitDateRows(date, next)
+
+    updates.forEach(update => enqueueStatus(userId, update))
+    setPendingIds(prev => {
+      const nextSet = new Set(prev)
+      updates.forEach(update => nextSet.add(update.id))
+      return nextSet
+    })
+    flushQueue()
+  }
+
+  // Re-apply the localStorage queue on mount (e.g. after a reload mid-sync) and
+  // then resume sending it to the server.
+  useEffect(() => {
+    if (!userId) return
+    let cancelled = false
+
+    async function hydrate() {
+      await Promise.resolve()
+      if (cancelled) return
+
+      const queue = readQueue(userId)
+      const ids = new Set(Object.keys(queue))
+      if (ids.size === 0) return
+
+      setPendingIds(ids)
+
+      const next = { ...rowsRef.current }
+      const changedDates = []
+      for (const date of Object.keys(next)) {
+        const applied = applyPending(next[date], queue)
+        if (applied !== next[date]) {
+          next[date] = applied
+          changedDates.push(date)
+        }
+      }
+      if (changedDates.length > 0) {
+        rowsRef.current = next
+        setRowsByDate(next)
+        changedDates.forEach(date =>
+          cacheSet(dateCacheKey(userId, date), next[date], CACHE_TTL)
+        )
+      }
+
+      flushQueue()
+    }
+
+    hydrate()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId])
+
+  // Retry as soon as the browser is online again or the tab becomes visible.
+  useEffect(() => {
+    function handleOnline() { flushQueue() }
+    function handleVisible() {
+      if (document.visibilityState === 'visible') flushQueue()
+    }
+    window.addEventListener('online', handleOnline)
+    document.addEventListener('visibilitychange', handleVisible)
+    return () => {
+      window.removeEventListener('online', handleOnline)
+      document.removeEventListener('visibilitychange', handleVisible)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => () => clearRetry(), [])
 
   // Warm the browser cache for the other dates in the background. Switching
   // dates later becomes instant instead of waiting for Supabase again.
@@ -184,7 +492,9 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
               .eq('assigned_to', userId)
               .eq('assign_date', date)
               .order('created_at', { ascending: true })
-            if (!cancelled && data) cacheSet(dateCacheKey(userId, date), data, CACHE_TTL)
+            if (!cancelled && data) {
+              cacheSet(dateCacheKey(userId, date), applyPending(data, readQueue(userId)), CACHE_TTL)
+            }
           })
         )
       }
@@ -193,24 +503,6 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     prefetch()
     return () => { cancelled = true }
   }, [dates, initialDate, userId, supabase])
-
-  // Keep the ref, React state and session cache in lockstep. Doing this in one
-  // helper means concurrent optimistic updates never read a stale snapshot.
-  function commitDateRows(date, nextRows) {
-    rowsRef.current = { ...rowsRef.current, [date]: nextRows }
-    setRowsByDate(rowsRef.current)
-    cacheSet(dateCacheKey(userId, date), nextRows, CACHE_TTL)
-  }
-
-  function setSaving(ids, saving) {
-    const next = new Set(savingRef.current)
-    ids.forEach(id => {
-      if (saving) next.add(id)
-      else next.delete(id)
-    })
-    savingRef.current = next
-    setSavingIds(next)
-  }
 
   async function loadDate(date) {
     setLoadingDate(date)
@@ -226,7 +518,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
       toast.error(error.message)
       return
     }
-    commitDateRows(date, data ?? [])
+    commitDateRows(date, applyPending(data ?? [], readQueue(userId)))
   }
 
   function changeDate(nextDate) {
@@ -242,7 +534,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
 
     const cached = cacheGet(dateCacheKey(userId, nextDate), { allowStale: true })
     if (cached) {
-      commitDateRows(nextDate, cached)
+      commitDateRows(nextDate, applyPending(cached, readQueue(userId)))
       return
     }
     loadDate(nextDate)
@@ -273,77 +565,74 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     else setSelectedIds(prev => Array.from(new Set([...prev, ...ids])))
   }
 
-  /**
-   * Optimistic + concurrent status update.
-   *
-   * Every row gets its own in-flight marker, so changing one row never blocks
-   * another. If a request fails, only the rows from that request are rolled
-   * back — other in-flight/successful changes are left untouched.
-   */
-  async function applyStatus(ids, newStatus) {
+  function applyStatus(ids, newStatus) {
     if (!selectedDate) return
     const date = selectedDate
-    const unique = Array.from(new Set(ids)).filter(id => !savingRef.current.has(id))
-    if (unique.length === 0) return
-
     const current = rowsRef.current[date] ?? []
-    const idSet = new Set(unique)
-    const previous = new Map()
+    const idSet = new Set(ids)
+    const isError = newStatus === 'error'
+    const updates = []
+
     current.forEach(row => {
-      if (idSet.has(row.id)) previous.set(row.id, row)
+      if (!idSet.has(row.id)) return
+
+      // Keep flags when a row is already an error; reset them for any other
+      // status. Non-error rows never carry error flags.
+      const keepFlags = row.status === 'error'
+      const nextNumber = isError && keepFlags ? !!row.error_number_verify : false
+      const nextLocked = isError && keepFlags ? !!row.error_locked : false
+
+      const unchanged =
+        row.status === newStatus &&
+        !!row.error_number_verify === nextNumber &&
+        !!row.error_locked === nextLocked
+      if (unchanged) return
+
+      updates.push({
+        id: row.id,
+        status: newStatus,
+        error_number_verify: nextNumber,
+        error_locked: nextLocked,
+        prev: {
+          status: row.status,
+          error_number_verify: !!row.error_number_verify,
+          error_locked: !!row.error_locked,
+          completed_at: row.completed_at ?? null,
+        },
+      })
     })
-    if (previous.size === 0) return
 
-    const completedAt = newStatus === 'pending' ? null : new Date().toISOString()
-    const optimistic = current.map(row =>
-      idSet.has(row.id) ? { ...row, status: newStatus, completed_at: completedAt } : row
-    )
-
-    commitDateRows(date, optimistic)
-    setSaving(unique, true)
+    if (updates.length === 0) return
+    commitUpdates(date, updates)
     setSelectedIds(prev => prev.filter(id => !idSet.has(id)))
+  }
 
-    const res = await updateStatus(unique, newStatus)
-    setSaving(unique, false)
+  function applyFlags(row, field, value) {
+    if (!selectedDate || row.status !== 'error') return
+    const date = selectedDate
+    const current = rowsRef.current[date] ?? []
+    const target = current.find(r => r.id === row.id)
+    if (!target) return
 
-    if (res?.error) {
-      revertRows(date, idSet, previous, newStatus, completedAt)
-      toast.error(res.error, { duration: 3500 })
+    const nextNumber = field === 'error_number_verify' ? value : !!target.error_number_verify
+    const nextLocked = field === 'error_locked' ? value : !!target.error_locked
+    if (nextNumber === !!target.error_number_verify && nextLocked === !!target.error_locked) {
       return
     }
 
-    // The server may have skipped rows that no longer belong to the user.
-    const updatedSet = new Set(res.updatedIds ?? unique)
-    if (updatedSet.size !== unique.length) {
-      revertRows(date, idSet, previous, newStatus, completedAt, updatedSet)
-    }
-
-    toast.success(
-      unique.length === 1
-        ? `Marked ${newStatus}`
-        : `${res.updated} item(s) → ${newStatus}`,
-      { id: `status-${date}-${newStatus}`, duration: 1400 }
-    )
+    commitUpdates(date, [{
+      id: target.id,
+      status: 'error',
+      error_number_verify: nextNumber,
+      error_locked: nextLocked,
+      prev: {
+        status: target.status,
+        error_number_verify: !!target.error_number_verify,
+        error_locked: !!target.error_locked,
+        completed_at: target.completed_at ?? null,
+      },
+    }])
   }
-
-  function revertRows(date, idSet, previous, newStatus, completedAt, keep = null) {
-    const latest = rowsRef.current[date] ?? []
-    let changed = false
-    const reverted = latest.map(row => {
-      if (!idSet.has(row.id)) return row
-      if (keep && keep.has(row.id)) return row
-      // Only revert a row that still shows this request's optimistic value,
-      // so a newer user action is never overwritten.
-      if (row.status !== newStatus || row.completed_at !== completedAt) return row
-      const before = previous.get(row.id)
-      if (!before) return row
-      changed = true
-      return { ...row, status: before.status, completed_at: before.completed_at }
-    })
-    if (changed) commitDateRows(date, reverted)
-  }
-
-  const pendingSelected = selectedIds.filter(id => !savingIds.has(id))
 
   if (dates.length === 0) {
     return (
@@ -378,9 +667,9 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
               <Loader2 size={12} className="animate-spin" /> Loading this date…
             </span>
           )}
-          {savingIds.size > 0 && (
+          {pendingIds.size > 0 && (
             <span className="text-xs text-slate-500 flex items-center gap-1">
-              <Loader2 size={12} className="animate-spin" /> Saving {savingIds.size}…
+              <CloudUpload size={12} className="animate-pulse" /> Syncing {pendingIds.size}…
             </span>
           )}
         </CardContent>
@@ -471,7 +760,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
                   <TableHead>Email</TableHead>
                   <TableHead>Password</TableHead>
                   <TableHead className="w-44">Status</TableHead>
-                  <TableHead className="w-32">Change</TableHead>
+                  <TableHead className="w-48">Change</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -480,9 +769,10 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
                     key={r.id}
                     row={r}
                     selected={selectedIds.includes(r.id)}
-                    saving={savingIds.has(r.id)}
+                    pending={pendingIds.has(r.id)}
                     onToggle={() => toggleOne(r.id)}
                     onStatusChange={(value) => applyStatus([r.id], value)}
+                    onFlagChange={(field, value) => applyFlags(r, field, value)}
                   />
                 ))}
                 {filtered.length === 0 && (
@@ -502,30 +792,27 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
         <div className="fixed bottom-0 left-0 md:left-64 right-0 bg-slate-900 text-white py-3 px-3 md:px-6 flex flex-wrap gap-2 items-center justify-between shadow-lg z-20">
           <span className="text-sm">
             {selectedIds.length} selected
-            {savingIds.size > 0 && ` · ${savingIds.size} saving`}
+            {pendingIds.size > 0 && ` · ${pendingIds.size} syncing`}
           </span>
           <div className="flex gap-2 flex-wrap">
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => applyStatus(pendingSelected, 'done')}
-              disabled={pendingSelected.length === 0}
+              onClick={() => applyStatus(selectedIds, 'done')}
             >
               Mark Done
             </Button>
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => applyStatus(pendingSelected, 'error')}
-              disabled={pendingSelected.length === 0}
+              onClick={() => applyStatus(selectedIds, 'error')}
             >
               Mark Error
             </Button>
             <Button
               size="sm"
               variant="secondary"
-              onClick={() => applyStatus(pendingSelected, 'pending')}
-              disabled={pendingSelected.length === 0}
+              onClick={() => applyStatus(selectedIds, 'pending')}
             >
               Mark Pending
             </Button>

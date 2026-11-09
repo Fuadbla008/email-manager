@@ -61,10 +61,11 @@ Reads: server pages query Supabase directly; client CRUD/report pages use the br
 ## Data model
 
 - `profiles`: `id`, `full_name`, `email`, `role` (`admin` | `user` | `supervisor`).
-- `email_credentials`: `email`, `password`, `status` (`pending|done|error`), `upload_date` (`YYYY-MM-DD`, set at upload), `assigned_to`, `assign_date` (`YYYY-MM-DD`), `assigned_at`, `assigned_by` (who assigned it), `verified_status` (`done|error|null`), `verified_at`, `verified_by`, `completed_at`, `created_at`.
+- `email_credentials`: `email`, `password`, `status` (`pending|done|error`), `upload_date` (`YYYY-MM-DD`, set at upload), `assigned_to`, `assign_date` (`YYYY-MM-DD`), `assigned_at`, `assigned_by` (who assigned it), `verified_status` (`done|error|null`), `verified_at`, `verified_by`, `completed_at`, `created_at`, `error_number_verify` (boolean), `error_locked` (boolean).
 - `activity_logs`: `user_id`, `credential_id`, `old_status`, `new_status`.
 - Joined profile data uses `profiles!assigned_to(...)`; `assigned_by` is not the same relationship.
 - Migration `supabase/migrations/20261107000000_upload_date_and_supervisor.sql` adds `upload_date`, `assigned_by`, indexes, backfills legacy rows, and widens the `profiles.role` check to include `supervisor`.
+- Migration `supabase/migrations/20261109000000_error_flags.sql` adds `error_number_verify` and `error_locked` (both `boolean not null default false`). Run it before deploying the error-flag UI; otherwise the task query and the admin detail export fail on the missing columns.
 
 ## Domain quirks
 
@@ -76,6 +77,8 @@ Reads: server pages query Supabase directly; client CRUD/report pages use the br
 - Supervisor assignment has its own actions (`supervisorAssignSelected`, `supervisorAssignNext`). They only touch rows where `upload_date` matches and `assigned_to IS NULL`, validate the target profile is `role = 'user'`, and stamp `assigned_by = supervisor.id`.
 - Supervisor unassign (`supervisorUnassign`) only clears rows where `assigned_by` is the caller **and** `status = 'pending'` (max 50 per call). Done/error rows are protected so users cannot lose submitted work; the assign page shows a "Your Pending Assignments" card for this.
 - User status changes and supervisor/admin assign/unassign update local state before awaiting the action (optimistic), then roll back from a snapshot and toast on error. The user tasks page tracks saving **per row** (not a global busy flag), so different rows update concurrently and one slow request never blocks another; rollback only touches rows from the failed request. It also caches each assignment date in `sessionStorage`, prefetches other dates 3 at a time, tints the email cell by status, and flashes it green on copy.
+- **Offline-first status writes:** the user tasks page persists each change to a `localStorage` queue (`lib/pending-status.js`, keyed by user id) *before* calling `updateStatus`. A background flusher sends the queue, removes confirmed rows, and retries failures with backoff plus on `online`/`visibilitychange`/next mount. A reload mid-sync re-applies the queue over server/cache rows, so nothing is lost. Only ids/status/error flags are stored — never emails or passwords.
+- **Error flags are user-only:** when a user marks a row `error`, the tasks page shows two checkboxes, `error_number_verify` ("Number verify") and `error_locked` ("Locked"). They are forced to `false` for any non-error status. Admin/supervisor dashboards and report tables do not display them; only the admin detail CSV (`exportAdminCredentials`) adds `Number Verify` / `Locked` columns. The supervisor detail export intentionally omits them.
 - Supervisor reports and the overview filter by `assigned_by = current user id`; admins can open the same pages and see their own assignments. `unassignCredentials` clears `assigned_by`.
 - Large list queries are explicitly capped: assign pool `.limit(500)`, dashboard date list `.limit(500)`, supervisor batch-date list `.limit(5000)`, supervisor pending list `.limit(500)`, credentials paginated at 50/page. Reports that must cover every row use `lib/supabase/fetch-all.js` in 1000-row pages.
 - Emails are trimmed and lowercased on upload and verify. Preserve normalization on new import/verification paths.
@@ -89,6 +92,8 @@ Required vars: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUP
 Before deploying code that touches upload dates or supervisors, run `supabase/migrations/20261107000000_upload_date_and_supervisor.sql` in the Supabase SQL editor. Without `upload_date`, `assigned_by`, and the widened role check, upload/assign/supervisor queries fail.
 
 Run `supabase/migrations/20261108000000_performance_indexes.sql` as well. It adds the indexes used by user task lists, date-wise reports, the upload pool, supervisor pending lists, and activity-log pagination.
+
+Before deploying the error-flag UI or the admin detail export, run `supabase/migrations/20261109000000_error_flags.sql`. It adds `error_number_verify` and `error_locked`; without them the user task query and the admin detail CSV fail.
 
 Supervisor accounts are still created manually in Supabase Auth + `profiles` (same as users). An admin can also promote an existing profile to `supervisor` from `/admin/users`.
 

@@ -35,7 +35,7 @@ export default async function UserTasksPage({ searchParams }) {
   if (selectedDate) {
     const { data } = await supabase
       .from('email_credentials')
-      .select('id, email, password, status, verified_status, completed_at')
+      .select('id, email, password, status, verified_status, completed_at, error_number_verify, error_locked')
       .eq('assigned_to', user.id)
       .eq('assign_date', selectedDate)
       .order('created_at', { ascending: true })
