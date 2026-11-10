@@ -40,8 +40,9 @@ export default async function UploadsPage() {
     rows = await fetchAllRows(() =>
       supabase
         .from('email_credentials')
-        .select('upload_date, assign_date, assigned_to, status, verified_status')
+        .select('id, upload_date, assign_date, assigned_to, status, verified_status')
         .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
     )
   } catch (error) {
     errorMessage = error.message

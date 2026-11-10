@@ -1,6 +1,7 @@
 import { connection } from 'next/server'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import CompletionBar from '@/components/completion-bar'
 import { Card, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -12,11 +13,20 @@ export default async function UserReportsPage() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const { data: rows } = await supabase
-    .from('email_credentials')
-    .select('assign_date, status, verified_status')
-    .eq('assigned_to', user.id)
-    .not('assign_date', 'is', null)
+  let rows = []
+  let errorMessage = null
+  try {
+    rows = await fetchAllRows(() =>
+      supabase
+        .from('email_credentials')
+        .select('id, assign_date, status, verified_status')
+        .eq('assigned_to', user.id)
+        .not('assign_date', 'is', null)
+        .order('id', { ascending: true })
+    )
+  } catch (error) {
+    errorMessage = error.message
+  }
 
   const map = new Map()
   ;(rows || []).forEach(r => {
@@ -46,6 +56,12 @@ export default async function UserReportsPage() {
       <p className="text-sm text-slate-500 mb-6">
         Compare what you claimed vs what admin verified.
       </p>
+
+      {errorMessage && (
+        <Card className="mb-4">
+          <CardContent className="py-6 text-center text-red-600">{errorMessage}</CardContent>
+        </Card>
+      )}
 
       {arr.length === 0 ? (
         <Card><CardContent className="py-12 text-center text-slate-500">No data yet.</CardContent></Card>

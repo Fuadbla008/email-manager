@@ -5,7 +5,7 @@ import Link from 'next/link'
 import * as XLSX from 'xlsx'
 import { toast } from 'sonner'
 import { createClient } from '@/lib/supabase/client'
-import { cacheGet, cacheSet } from '@/lib/client-cache'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { downloadCsv } from '@/lib/csv'
 import { exportAdminCredentials } from '@/app/actions/export'
 import CompletionBar from '@/components/completion-bar'
@@ -89,92 +89,105 @@ export default function ReportsPage() {
 
   useEffect(() => {
     let cancelled = false
-    supabase.from('profiles').select('id, full_name, email').eq('role', 'user')
-      .then(({ data }) => { if (!cancelled) setUsers(data || []) })
+    fetchAllRows(() =>
+      supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .eq('role', 'user')
+        .order('id', { ascending: true })
+    )
+      .then(data => { if (!cancelled) setUsers(data) })
+      .catch(() => {})
     return () => { cancelled = true }
   }, [supabase])
 
   // Tab 1: Per date
   useEffect(() => {
     if (!date) return
-    const key = `admin:report:date:${date}`
-    const cached = cacheGet(key)
-    if (cached) setPerDate(cached)
-    else setLoadingDate(true)
-
     let cancelled = false
-    supabase
-      .from('email_credentials')
-      .select('assigned_to, status, verified_status, profiles!assigned_to(full_name, email)')
-      .eq('assign_date', date)
-      .not('assigned_to', 'is', null)
-      .then(({ data, error }) => {
+    setLoadingDate(true)
+
+    // Page through every row: a single `.select()` stops at the PostgREST row
+    // cap (1000 by default) and would undercount busy dates.
+    fetchAllRows(() =>
+      supabase
+        .from('email_credentials')
+        .select('id, assigned_to, status, verified_status, profiles!assigned_to(full_name, email)')
+        .eq('assign_date', date)
+        .not('assigned_to', 'is', null)
+        .order('id', { ascending: true })
+    )
+      .then(data => {
         if (cancelled) return
-        if (error) toast.error(error.message)
-        else {
-          const next = aggregate(data || [], r => r.assigned_to)
-          setPerDate(next)
-          cacheSet(key, next, 60 * 1000)
-        }
-        setLoadingDate(false)
+        setPerDate(aggregate(data, r => r.assigned_to))
       })
+      .catch(error => {
+        if (!cancelled) toast.error(error.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDate(false)
+      })
+
     return () => { cancelled = true }
   }, [date, supabase])
 
   // Tab 2: Per user
   useEffect(() => {
     if (!userId || !fromDate || !toDate) { setPerUser([]); return }
-    const key = `admin:report:user:${userId}:${fromDate}:${toDate}`
-    const cached = cacheGet(key)
-    if (cached) setPerUser(cached)
-    else setLoadingUser(true)
-
     let cancelled = false
-    supabase
-      .from('email_credentials')
-      .select('assign_date, status, verified_status, profiles!assigned_to(full_name, email)')
-      .eq('assigned_to', userId)
-      .gte('assign_date', fromDate)
-      .lte('assign_date', toDate)
-      .then(({ data, error }) => {
+    setLoadingUser(true)
+
+    fetchAllRows(() =>
+      supabase
+        .from('email_credentials')
+        .select('id, assign_date, status, verified_status, profiles!assigned_to(full_name, email)')
+        .eq('assigned_to', userId)
+        .gte('assign_date', fromDate)
+        .lte('assign_date', toDate)
+        .order('id', { ascending: true })
+    )
+      .then(data => {
         if (cancelled) return
-        if (error) toast.error(error.message)
-        else {
-          const arr = aggregate(data || [], r => r.assign_date)
+        setPerUser(
+          aggregate(data, r => r.assign_date)
             .sort((a, b) => String(b.key).localeCompare(String(a.key)))
-          setPerUser(arr)
-          cacheSet(key, arr, 60 * 1000)
-        }
-        setLoadingUser(false)
+        )
       })
+      .catch(error => {
+        if (!cancelled) toast.error(error.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingUser(false)
+      })
+
     return () => { cancelled = true }
   }, [userId, fromDate, toDate, supabase])
 
   // Tab 3: Discrepancies
   useEffect(() => {
     if (!dDate) return
-    const key = `admin:report:disc:${dDate}:${dUser}`
-    const cached = cacheGet(key)
-    if (cached) setDisc(cached)
-    else setLoadingDisc(true)
-
     let cancelled = false
-    let q = supabase
-      .from('email_credentials')
-      .select('id, email, status, verified_status, assign_date, assigned_to, profiles!assigned_to(full_name, email)')
-      .eq('assign_date', dDate)
-      .not('verified_status', 'is', null)
-    if (dUser !== 'all') q = q.eq('assigned_to', dUser)
-    q.then(({ data, error }) => {
-      if (cancelled) return
-      if (error) toast.error(error.message)
-      else {
-        const next = (data || []).filter(r => r.status !== r.verified_status)
-        setDisc(next)
-        cacheSet(key, next, 60 * 1000)
-      }
-      setLoadingDisc(false)
+    setLoadingDisc(true)
+
+    fetchAllRows(() => {
+      let q = supabase
+        .from('email_credentials')
+        .select('id, email, status, verified_status, assign_date, assigned_to, profiles!assigned_to(full_name, email)')
+        .eq('assign_date', dDate)
+        .not('verified_status', 'is', null)
+      if (dUser !== 'all') q = q.eq('assigned_to', dUser)
+      return q.order('id', { ascending: true })
     })
+      .then(data => {
+        if (!cancelled) setDisc(data.filter(r => r.status !== r.verified_status))
+      })
+      .catch(error => {
+        if (!cancelled) toast.error(error.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDisc(false)
+      })
+
     return () => { cancelled = true }
   }, [dDate, dUser, supabase])
 

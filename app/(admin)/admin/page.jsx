@@ -1,5 +1,6 @@
 import { connection } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import CompletionBar from '@/components/completion-bar'
 import { Card, CardHeader, CardDescription, CardTitle, CardContent } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -20,22 +21,30 @@ export default async function AdminDashboard({ searchParams }) {
     { count: userCount },
     { count: credCount },
     { count: assignedCount },
-    { data: todayRows },
     { data: allUsers },
-    { data: dateRows },
   ] = await Promise.all([
     supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('role', 'user'),
     supabase.from('email_credentials').select('*', { count: 'exact', head: true }),
     supabase.from('email_credentials').select('*', { count: 'exact', head: true }).not('assigned_to', 'is', null),
-    supabase.from('email_credentials').select('status, assigned_to').eq('assign_date', date),
     supabase.from('profiles').select('id, full_name, email').eq('role', 'user'),
-    supabase
-      .from('email_credentials')
-      .select('assign_date')
-      .not('assign_date', 'is', null)
-      .order('assign_date', { ascending: false })
-      .limit(500),
   ])
+
+  // Supabase/PostgREST returns at most 1000 rows per request, so an aggregate
+  // over a single `.select()` silently loses rows once a date has more than
+  // that. Page through every row and order by `id` so pages never overlap.
+  let todayRows = []
+  let rowsError = null
+  try {
+    todayRows = await fetchAllRows(() =>
+      supabase
+        .from('email_credentials')
+        .select('id, status, assigned_to')
+        .eq('assign_date', date)
+        .order('id', { ascending: true })
+    )
+  } catch (error) {
+    rowsError = error.message
+  }
 
   // Overall counts for selected date
   const counts = { total: 0, pending: 0, done: 0, error: 0 }
@@ -64,9 +73,6 @@ export default async function AdminDashboard({ searchParams }) {
     .filter(u => u.total > 0)
     .sort((a, b) => b.total - a.total)
 
-  // Unique dates
-  const dateList = Array.from(new Set((dateRows ?? []).map(r => r.assign_date)))
-
   return (
     <div>
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -75,14 +81,12 @@ export default async function AdminDashboard({ searchParams }) {
           <p className="text-sm text-slate-500">Date: {date}</p>
         </div>
         <form method="GET" className="flex gap-2 items-center">
-          <select
+          <input
+            type="date"
             name="date"
             defaultValue={date}
             className="border rounded px-3 py-2 text-sm bg-white"
-          >
-            {!dateList.includes(date) && <option value={date}>{date}</option>}
-            {dateList.map(d => <option key={d} value={d}>{d}</option>)}
-          </select>
+          />
           <button
             type="submit"
             className="px-3 py-2 text-sm bg-slate-900 text-white rounded hover:bg-slate-800"
@@ -91,6 +95,14 @@ export default async function AdminDashboard({ searchParams }) {
           </button>
         </form>
       </div>
+
+      {rowsError && (
+        <Card className="mb-6">
+          <CardContent className="py-6 text-center text-red-600">
+            Could not load counts: {rowsError}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <Card>

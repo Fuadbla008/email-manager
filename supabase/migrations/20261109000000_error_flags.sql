@@ -19,3 +19,6 @@ set error_number_verify = false,
     error_locked = false
 where status <> 'error'
   and (error_number_verify or error_locked);
+
+-- Make PostgREST see the new columns immediately.
+notify pgrst, 'reload schema';
