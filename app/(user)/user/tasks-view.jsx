@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { CheckCircle2, XCircle, Clock, Loader2, CloudUpload } from 'lucide-react'
 import { updateStatus } from '@/app/actions/user'
 import { createClient } from '@/lib/supabase/client'
+import { fetchAllRows } from '@/lib/supabase/fetch-all'
 import { cacheGet, cacheKey, cacheSet } from '@/lib/client-cache'
 import {
   applyPending,
@@ -26,6 +27,9 @@ const CACHE_TTL = 10 * 60 * 1000
 const ROW_SELECT =
   'id, email, password, status, verified_status, completed_at, error_number_verify, error_locked'
 const FLUSH_CHUNK = 500
+// Background warm-up is best-effort: cap it so a user with many dates does not
+// trigger a request storm on every mount.
+const PREFETCH_DATES = 6
 
 // The email cell is tinted with the row's current status. Pending is yellow,
 // done is green and error is red, so the table is scannable at a glance.
@@ -43,6 +47,23 @@ const STATUS_BORDER = {
 
 function dateCacheKey(userId, date) {
   return cacheKey('user', userId, 'date', date)
+}
+
+/**
+ * Every row for one user/date, 1000 at a time. A single `.select()` would stop
+ * at the PostgREST row cap, so a user with more than 1000 rows on a date would
+ * silently lose the rest. `id` is the unique tiebreaker for stable paging.
+ */
+function fetchDateRows(supabase, userId, date) {
+  return fetchAllRows(() =>
+    supabase
+      .from('email_credentials')
+      .select(ROW_SELECT)
+      .eq('assigned_to', userId)
+      .eq('assign_date', date)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+  )
 }
 
 function CopyCell({ value, masked = false, onCopied, flash = false, className = '' }) {
@@ -175,7 +196,7 @@ function TaskRow({ row, selected, pending, onToggle, onStatusChange, onFlagChang
   )
 }
 
-export default function TasksView({ userId, userEmail, dates, initialDate, initialRows }) {
+export default function TasksView({ userId, userEmail, dates, initialDate, initialRows, loadError = null }) {
   const supabase = useMemo(() => createClient(), [])
   const [selectedDate, setSelectedDate] = useState(initialDate)
   // Both start from the same server payload. The ref is the synchronous source
@@ -474,26 +495,27 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
   useEffect(() => () => clearRetry(), [])
 
   // Warm the browser cache for the other dates in the background. Switching
-  // dates later becomes instant instead of waiting for Supabase again.
+  // dates later becomes instant instead of waiting for Supabase again. Only
+  // dates without a *fresh* cache are fetched, so an expired (and possibly
+  // truncated) entry is replaced instead of being reused forever.
   useEffect(() => {
     if (!userId || dates.length <= 1) return
     let cancelled = false
 
     async function prefetch() {
-      const missing = dates.filter(
-        date => date !== initialDate && !cacheGet(dateCacheKey(userId, date), { allowStale: true })
-      )
+      const missing = dates
+        .filter(date => date !== initialDate && !cacheGet(dateCacheKey(userId, date)))
+        .slice(0, PREFETCH_DATES)
       for (let i = 0; i < missing.length; i += 3) {
         await Promise.all(
           missing.slice(i, i + 3).map(async date => {
-            const { data } = await supabase
-              .from('email_credentials')
-              .select(ROW_SELECT)
-              .eq('assigned_to', userId)
-              .eq('assign_date', date)
-              .order('created_at', { ascending: true })
-            if (!cancelled && data) {
-              cacheSet(dateCacheKey(userId, date), applyPending(data, readQueue(userId)), CACHE_TTL)
+            try {
+              const data = await fetchDateRows(supabase, userId, date)
+              if (!cancelled) {
+                cacheSet(dateCacheKey(userId, date), applyPending(data, readQueue(userId)), CACHE_TTL)
+              }
+            } catch {
+              // Warm-up only: never disturb the page the user is working on.
             }
           })
         )
@@ -504,21 +526,16 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     return () => { cancelled = true }
   }, [dates, initialDate, userId, supabase])
 
-  async function loadDate(date) {
-    setLoadingDate(date)
-    const { data, error } = await supabase
-      .from('email_credentials')
-      .select(ROW_SELECT)
-      .eq('assigned_to', userId)
-      .eq('assign_date', date)
-      .order('created_at', { ascending: true })
-
-    setLoadingDate(current => (current === date ? null : current))
-    if (error) {
-      toast.error(error.message)
-      return
+  async function loadDate(date, { quiet = false } = {}) {
+    if (!quiet) setLoadingDate(date)
+    try {
+      const data = await fetchDateRows(supabase, userId, date)
+      commitDateRows(date, applyPending(data, readQueue(userId)))
+    } catch (error) {
+      if (!quiet) toast.error(error.message)
+    } finally {
+      if (!quiet) setLoadingDate(current => (current === date ? null : current))
     }
-    commitDateRows(date, applyPending(data ?? [], readQueue(userId)))
   }
 
   function changeDate(nextDate) {
@@ -534,7 +551,12 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
 
     const cached = cacheGet(dateCacheKey(userId, nextDate), { allowStale: true })
     if (cached) {
+      // Check freshness before `commitDateRows` re-saves the cache and resets
+      // its timestamp. A stale list is shown immediately, then refreshed in the
+      // background because the admin may have assigned more rows since.
+      const isFresh = !!cacheGet(dateCacheKey(userId, nextDate))
       commitDateRows(nextDate, applyPending(cached, readQueue(userId)))
+      if (!isFresh) loadDate(nextDate, { quiet: true })
       return
     }
     loadDate(nextDate)
@@ -554,13 +576,17 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     })
   }, [rows, filterStatus, search])
 
+  // A Set keeps the "is this row selected?" check O(1); with thousands of rows
+  // `Array.includes` per row would be quadratic.
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
+
   function toggleOne(id) {
     setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   }
 
   function toggleAll() {
     const ids = filtered.map(r => r.id)
-    const all = ids.length > 0 && ids.every(id => selectedIds.includes(id))
+    const all = ids.length > 0 && ids.every(id => selectedSet.has(id))
     if (all) setSelectedIds(prev => prev.filter(id => !ids.includes(id)))
     else setSelectedIds(prev => Array.from(new Set([...prev, ...ids])))
   }
@@ -640,8 +666,10 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
         <h1 className="text-2xl font-bold mb-2">My Tasks</h1>
         <p className="text-sm text-slate-500 mb-6">Welcome, {userEmail}</p>
         <Card>
-          <CardContent className="py-12 text-center text-slate-500">
-            No assignments yet. Wait for admin to assign credentials to you.
+          <CardContent className={`py-12 text-center ${loadError ? 'text-red-600' : 'text-slate-500'}`}>
+            {loadError
+              ? `Could not load your assignments: ${loadError}`
+              : 'No assignments yet. Wait for admin to assign credentials to you.'}
           </CardContent>
         </Card>
       </div>
@@ -652,6 +680,14 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     <div className="pb-24">
       <h1 className="text-2xl font-bold mb-2">My Tasks</h1>
       <p className="text-sm text-slate-500 mb-6">Welcome, {userEmail}</p>
+
+      {loadError && (
+        <Card className="mb-4">
+          <CardContent className="py-4 text-center text-red-600">
+            Some assignments could not be loaded: {loadError}
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="mb-4">
         <CardContent className="pt-4 flex items-center gap-3 flex-wrap">
@@ -753,7 +789,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
                 <TableRow>
                   <TableHead className="w-12">
                     <Checkbox
-                      checked={filtered.length > 0 && filtered.every(r => selectedIds.includes(r.id))}
+                      checked={filtered.length > 0 && filtered.every(r => selectedSet.has(r.id))}
                       onCheckedChange={toggleAll}
                     />
                   </TableHead>
@@ -768,7 +804,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
                   <TaskRow
                     key={r.id}
                     row={r}
-                    selected={selectedIds.includes(r.id)}
+                    selected={selectedSet.has(r.id)}
                     pending={pendingIds.has(r.id)}
                     onToggle={() => toggleOne(r.id)}
                     onStatusChange={(value) => applyStatus([r.id], value)}
