@@ -135,7 +135,7 @@ function ErrorFlags({ row, onFlagChange }) {
   )
 }
 
-function TaskRow({ row, selected, pending, onToggle, onStatusChange, onFlagChange }) {
+function TaskRow({ row, selected, pending, onToggle, onSelect, onStatusChange, onFlagChange }) {
   const [copied, setCopied] = useState(null)
   const timer = useRef(null)
 
@@ -145,6 +145,9 @@ function TaskRow({ row, selected, pending, onToggle, onStatusChange, onFlagChang
 
   function markCopied(field) {
     setCopied(field)
+    // Copying picks the row up for bulk actions. It only ever selects: the user
+    // unmarks a row from the checkbox, never by copying again.
+    onSelect?.()
     if (timer.current) clearTimeout(timer.current)
     timer.current = setTimeout(() => setCopied(null), 800)
   }
@@ -193,6 +196,83 @@ function TaskRow({ row, selected, pending, onToggle, onStatusChange, onFlagChang
         <ErrorFlags row={row} onFlagChange={onFlagChange} />
       </TableCell>
     </TableRow>
+  )
+}
+
+/**
+ * Mobile layout for one row. The desktop table keeps its columns, but on a
+ * phone the email gets the full width and the remaining fields sit in a small
+ * grid, instead of squeezing five columns into the viewport.
+ */
+function TaskCard({ row, selected, pending, onToggle, onSelect, onStatusChange, onFlagChange }) {
+  const [copied, setCopied] = useState(null)
+  const timer = useRef(null)
+
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current)
+  }, [])
+
+  function markCopied(field) {
+    setCopied(field)
+    onSelect?.()
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setCopied(null), 800)
+  }
+
+  const emailFlash = copied === 'email' || copied === 'password'
+  const passwordFlash = copied === 'password'
+
+  return (
+    <div
+      className={`rounded-lg border bg-white p-3 transition-shadow ${
+        selected ? 'border-blue-400 ring-2 ring-blue-100' : ''
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <Checkbox checked={selected} onCheckedChange={onToggle} className="mt-0.5" />
+        <div className="min-w-0 flex-1 space-y-2">
+          <div>
+            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Email</div>
+            <CopyCell
+              value={row.email}
+              onCopied={() => markCopied('email')}
+              flash={emailFlash}
+              className={emailFlash ? '' : (STATUS_BG[row.status] ?? '')}
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Password</div>
+              <CopyCell
+                value={row.password}
+                masked
+                onCopied={() => markCopied('password')}
+                flash={passwordFlash}
+              />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Status</div>
+              <StatusBadge status={row.status} verified={row.verified_status} />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Select value={row.status} onValueChange={onStatusChange}>
+              <SelectTrigger className="h-8 w-full text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pending">Pending</SelectItem>
+                <SelectItem value="done">Done</SelectItem>
+                <SelectItem value="error">Error</SelectItem>
+              </SelectContent>
+            </Select>
+            {pending && <Loader2 size={14} className="animate-spin text-slate-400" />}
+          </div>
+
+          <ErrorFlags row={row} onFlagChange={onFlagChange} />
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -584,6 +664,12 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
     setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
   }
 
+  // Copying an email/password marks the row for bulk actions. This only adds;
+  // unmarking is always the checkbox's job.
+  function selectRow(id) {
+    setSelectedIds(prev => (prev.includes(id) ? prev : [...prev, id]))
+  }
+
   function toggleAll() {
     const ids = filtered.map(r => r.id)
     const all = ids.length > 0 && ids.every(id => selectedSet.has(id))
@@ -783,7 +869,27 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
 
       <Card>
         <CardContent className="p-0">
-          <div className="max-h-[600px] overflow-auto">
+          <div className="space-y-2 p-2 md:hidden">
+            {filtered.map(r => (
+              <TaskCard
+                key={r.id}
+                row={r}
+                selected={selectedSet.has(r.id)}
+                pending={pendingIds.has(r.id)}
+                onToggle={() => toggleOne(r.id)}
+                onSelect={() => selectRow(r.id)}
+                onStatusChange={(value) => applyStatus([r.id], value)}
+                onFlagChange={(field, value) => applyFlags(r, field, value)}
+              />
+            ))}
+            {filtered.length === 0 && (
+              <div className="py-8 text-center text-slate-500">
+                {loadingDate === selectedDate ? 'Loading…' : 'No items match.'}
+              </div>
+            )}
+          </div>
+
+          <div className="hidden max-h-[600px] overflow-auto md:block">
             <Table>
               <TableHeader className="sticky top-0 bg-white z-10">
                 <TableRow>
@@ -807,6 +913,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
                     selected={selectedSet.has(r.id)}
                     pending={pendingIds.has(r.id)}
                     onToggle={() => toggleOne(r.id)}
+                    onSelect={() => selectRow(r.id)}
                     onStatusChange={(value) => applyStatus([r.id], value)}
                     onFlagChange={(field, value) => applyFlags(r, field, value)}
                   />
@@ -825,7 +932,7 @@ export default function TasksView({ userId, userEmail, dates, initialDate, initi
       </Card>
 
       {selectedIds.length > 0 && (
-        <div className="fixed bottom-0 left-0 md:left-64 right-0 bg-slate-900 text-white py-3 px-3 md:px-6 flex flex-wrap gap-2 items-center justify-between shadow-lg z-20">
+        <div className="fixed bottom-0 left-0 right-0 z-20 flex flex-wrap items-center justify-between gap-2 bg-slate-900 px-3 py-3 text-white shadow-lg md:left-[var(--sidebar-w,16rem)] md:px-6">
           <span className="text-sm">
             {selectedIds.length} selected
             {pendingIds.size > 0 && ` · ${pendingIds.size} syncing`}

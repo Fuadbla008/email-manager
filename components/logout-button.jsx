@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
  * flaky connection cannot leave the button stuck. A hard navigation then
  * guarantees no stale router/RSC state survives the sign-out.
  */
-export default function LogoutButton({ className = '' }) {
+export default function LogoutButton({ className = '', compact = false }) {
   const [pending, setPending] = useState(false)
 
   async function handleLogout() {
@@ -33,13 +33,16 @@ export default function LogoutButton({ className = '' }) {
   return (
     <Button
       variant="outline"
+      size={compact ? 'icon' : 'default'}
       type="button"
       onClick={handleLogout}
       disabled={pending}
+      title={compact ? 'Logout' : undefined}
+      aria-label={compact ? 'Logout' : undefined}
       className={`w-full border-white/20 bg-white text-slate-900 hover:bg-slate-100 hover:text-slate-900 ${className}`}
     >
       {pending ? <Loader2 className="animate-spin" /> : <LogOut />}
-      {pending ? 'Signing out…' : 'Logout'}
+      {!compact && (pending ? 'Signing out…' : 'Logout')}
     </Button>
   )
 }
