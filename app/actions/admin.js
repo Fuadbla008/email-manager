@@ -243,33 +243,72 @@ export async function verifyCredentials({ date, rows }) {
   }
 
   const emails = normalized.map(r => r.email)
-  const { data: creds, error } = await adminSupabase
-    .from('email_credentials')
-    .select('id, email')
-    .eq('assign_date', date)
-    .in('email', emails)
+  
+  // ১. ৫০টি করে ইমেইল ব্যাচ করে ডেটা আনা (400 Error সমাধান করবে)
+  const chunkSize = 50
+  const creds = []
 
-  if (error) return { error: error.message }
+  for (let i = 0; i < emails.length; i += chunkSize) {
+    const batch = emails.slice(i, i + chunkSize)
+    const { data, error } = await adminSupabase
+      .from('email_credentials')
+      .select('id, email')
+      .eq('assign_date', date)
+      .in('email', batch)
+
+    if (error) return { error: error.message }
+    if (data) creds.push(...data)
+  }
 
   const map = new Map()
-  ;(creds || []).forEach(c => map.set(c.email.toLowerCase(), c.id))
+  creds.forEach(c => map.set(c.email.toLowerCase(), c.id))
 
   const now = new Date().toISOString()
   const notFound = []
-  let updated = 0
+  const doneIds = []
+  const errorIds = []
 
+  // ২. 'done' এবং 'error' আইডিগুলো আলাদা করা
   for (const r of normalized) {
     const id = map.get(r.email)
-    if (!id) { notFound.push(r.email); continue }
+    if (!id) {
+      notFound.push(r.email)
+      continue
+    }
+    if (r.result === 'done') doneIds.push(id)
+    else if (r.result === 'error') errorIds.push(id)
+  }
+
+  let updated = 0
+
+  // ৩. একসাথে ব্যাচ করে 'done' গুলো আপডেট করা (অনেক ফাস্ট কাজ করবে)
+  for (let i = 0; i < doneIds.length; i += chunkSize) {
+    const idBatch = doneIds.slice(i, i + chunkSize)
     const { error: updErr } = await adminSupabase
       .from('email_credentials')
       .update({
-        verified_status: r.result,
+        verified_status: 'done',
         verified_at: now,
         verified_by: adminUser.id,
       })
-      .eq('id', id)
-    if (!updErr) updated++
+      .in('id', idBatch)
+
+    if (!updErr) updated += idBatch.length
+  }
+
+  // ৪. একসাথে ব্যাচ করে 'error' গুলো আপডেট করা
+  for (let i = 0; i < errorIds.length; i += chunkSize) {
+    const idBatch = errorIds.slice(i, i + chunkSize)
+    const { error: updErr } = await adminSupabase
+      .from('email_credentials')
+      .update({
+        verified_status: 'error',
+        verified_at: now,
+        verified_by: adminUser.id,
+      })
+      .in('id', idBatch)
+
+    if (!updErr) updated += idBatch.length
   }
 
   revalidatePath('/admin/verify')
